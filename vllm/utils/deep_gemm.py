@@ -743,3 +743,89 @@ __all__ = [
     "get_mn_major_tma_aligned_packed_ue8m0_tensor",
     "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
 ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# plans/101 (DGX Spark GB10 / sm_121) — DeepGEMM sm_121 short-circuit.
+# DeepGEMM ships NO sm_120/sm_121 kernels for the DeepSeek-Sparse-Attention
+# indexer (fp8_mqa_logits / fp8_fp4_paged_mqa_logits / tf32_hc_prenorm_gemm) —
+# they assert "Unsupported architecture" (deepgemm attention.hpp). On capability
+# family 120 we rebind these public entrypoints to CosmicRaisins' portable Triton
+# drop-ins (vllm.v1.attention.ops.deepseek_v4_ops.sm12x_deep_gemm_fallbacks).
+# Reconstructs the `glm52-sm12x-sparse` mod's "in-place wrapper patch" (that mod
+# is not publicly published). Rebinding at module scope means both
+# `import vllm.utils.deep_gemm` and `from vllm.utils.deep_gemm import fp8_...`
+# (name import, as the indexer does) get the patched behavior. Signatures verified
+# to match the public fns; the paged drop-in self-schedules (ignores
+# schedule_metadata / clean_logits), so get_paged_mqa_logits_metadata returns a
+# shape-only dummy (stock indexer.py copies it into a preallocated
+# (num_sms+1, 2) int32 CUDA tensor, so it cannot be None).
+def _dgx_sm12x_active() -> bool:
+    try:
+        from vllm.platforms import current_platform
+
+        return bool(current_platform.is_device_capability_family(120))
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+if _dgx_sm12x_active():
+    from vllm.logger import init_logger as _dgx_init_logger
+
+    _dgx_log = _dgx_init_logger(__name__)
+    try:
+        from vllm.v1.attention.ops.deepseek_v4_ops.sm12x_deep_gemm_fallbacks import (
+            _fp8_mqa_logits_sm12x as _dgx_mqa,
+            _fp8_paged_mqa_logits_sm12x as _dgx_paged,
+            _tf32_hc_prenorm_gemm_sm12x as _dgx_tf32,
+        )
+
+        def fp8_fp4_mqa_logits(  # noqa: F811
+            q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+        ):
+            return _dgx_mqa(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits)
+
+        def fp8_fp4_paged_mqa_logits(  # noqa: F811
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_tables,
+            schedule_metadata,
+            max_model_len,
+            clean_logits,
+        ):
+            # sm12x Triton kernel self-schedules → schedule_metadata/clean_logits unused
+            return _dgx_paged(
+                q, kv_cache, weights, context_lens, block_tables, max_model_len
+            )
+
+        def get_paged_mqa_logits_metadata(  # noqa: F811
+            context_lens, block_size, num_sms
+        ):
+            # The sm12x paged kernel self-schedules, so these CONTENTS are unused.
+            # But stock v1/attention/backends/mla/indexer.py build() (which cosmic
+            # does NOT overlay) still does
+            #   self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(...)
+            # into a preallocated (num_sms+1, 2) int32 CUDA buffer, so returning
+            # None raises "can't assign a NoneType to a torch.cuda.IntTensor".
+            # Return a correctly shaped zero buffer to satisfy that copy; the buffer
+            # then rides through decode_metadata.schedule_metadata into
+            # fp8_fp4_paged_mqa_logits above, which ignores it. (plans/101)
+            return torch.zeros(
+                (num_sms + 1, 2), dtype=torch.int32, device=context_lens.device
+            )
+
+        def tf32_hc_prenorm_gemm(x, fn, out, sqrsum, num_split):  # noqa: F811
+            return _dgx_tf32(x, fn, out, sqrsum, num_split)
+
+        _dgx_log.info(
+            "plans/101: DeepGEMM sm_121 short-circuit active — MQA/indexer kernels "
+            "routed to Triton (sm12x_deep_gemm_fallbacks)."
+        )
+    except Exception as _dgx_exc:  # pragma: no cover
+        _dgx_log.warning(
+            "plans/101: DeepGEMM sm_121 short-circuit FAILED to bind (%s); "
+            "DSA will hit the DeepGEMM 'Unsupported architecture' assertion.",
+            _dgx_exc,
+        )

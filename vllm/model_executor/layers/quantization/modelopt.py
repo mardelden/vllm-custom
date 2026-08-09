@@ -101,6 +101,51 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# plans/101 (DGX Spark GB10) — env-gated per-MoE-layer memory trace + fix #2 hook.
+# Set VLLM_DGX_LOG_LAYER_MEM=1 to log one `DGX_LAYER_MEM` line per NVFP4 MoE layer
+# at each stage of process_weights_after_loading (entry / post_convert / post_replace
+# / post_2ndpass), so the full 3-node load emits a precise per-layer memory curve in
+# the journal instead of eyeballing nvitop. `alloc` = current live bytes (shows the
+# within-layer transient); `peak` = max since this layer's entry; `reserved` = the
+# caching-allocator reserve (whether fix #1 is returning it); `used/avail` = the true
+# UMA picture (psutil, since cudaMemGetInfo underreports on integrated GPUs).
+# Set VLLM_DGX_EAGER_FREE=1 to add an explicit empty_cache() after the per-layer
+# replace_parameter sweep (fix #2 Lever A — the within-layer twin of fix #1). Both are
+# no-ops when unset, so this file is safe to bake into the image unconditionally.
+import os as _dgx_os
+
+_DGX_LOG_LAYER_MEM = _dgx_os.environ.get("VLLM_DGX_LOG_LAYER_MEM", "") not in ("", "0", "false", "False")
+_DGX_EAGER_FREE = _dgx_os.environ.get("VLLM_DGX_EAGER_FREE", "") not in ("", "0", "false", "False")
+_dgx_layer_counter = 0
+_dgx_cw_counter = 0  # plans/101: MoE layers whose empty buffers create_weights allocated on THIS rank
+
+
+def _dgx_layer_mem(stage: str, layer_idx: int) -> None:
+    """plans/101: log one memory datapoint for the current MoE layer's post-load stage."""
+    if not _DGX_LOG_LAYER_MEM:
+        return
+    try:
+        import psutil as _ps
+
+        dev = torch.cuda.current_device()
+        g = 1 << 30
+        vm = _ps.virtual_memory()
+        logger.info(
+            "DGX_LAYER_MEM layer=%d stage=%s alloc=%.2f peak=%.2f reserved=%.2f "
+            "used=%.2f avail=%.2f (GiB)",
+            layer_idx,
+            stage,
+            torch.cuda.memory_allocated(dev) / g,
+            torch.cuda.max_memory_allocated(dev) / g,
+            torch.cuda.memory_reserved(dev) / g,
+            vm.used / g,
+            vm.available / g,
+        )
+    except Exception as _e:  # instrumentation must never break a load
+        logger.warning("DGX_LAYER_MEM logging failed: %s", _e)
+
+
 QUANT_ALGOS = [
     # FP8 (per-tensor weight + optional static activation scale).
     "FP8",
@@ -1448,6 +1493,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.params_dtype = params_dtype
         layer.quant_config = self.quant_config
+        # plans/101: log each MoE layer whose empty buffers we allocate on THIS rank — the count of
+        # DGX_CREATE_WEIGHTS lines per rank (Ray prefix) = that rank's actual MoE-layer share, and
+        # `alloc` shows the cumulative weight footprint climbing toward the OOM. Answers "24 vs 26?".
+        if _DGX_LOG_LAYER_MEM:
+            global _dgx_cw_counter
+            _dgx_cw_counter += 1
+            try:
+                import psutil as _ps
+
+                _dev = torch.cuda.current_device()
+                _g = 1 << 30
+                _vm = _ps.virtual_memory()
+                logger.info(
+                    "DGX_CREATE_WEIGHTS moe#=%d experts=%d H=%d I=%d alloc=%.2f used=%.2f avail=%.2f (GiB)",
+                    _dgx_cw_counter,
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    torch.cuda.memory_allocated(_dev) / _g,
+                    _vm.used / _g,
+                    _vm.available / _g,
+                )
+            except Exception as _e:
+                logger.warning("DGX_CREATE_WEIGHTS log failed: %s", _e)
         weight_dtype = torch.uint8
         weight_scale_dtype = torch.float8_e4m3fn
         weight_loader = extra_weight_attrs.get("weight_loader")
@@ -1554,6 +1623,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        # plans/101: per-layer memory trace (env-gated). Reset the peak so `peak` below
+        # reflects THIS layer's transient; count layers across the whole load.
+        global _dgx_layer_counter
+        _dgx_li = _dgx_layer_counter
+        _dgx_layer_counter += 1
+        if _DGX_LOG_LAYER_MEM:
+            torch.cuda.reset_peak_memory_stats()
+        _dgx_layer_mem("entry", _dgx_li)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
@@ -1587,6 +1664,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
+        _dgx_layer_mem("post_convert", _dgx_li)  # plans/101: peak of the reorder/swizzle transient
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -1596,6 +1674,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
+        # plans/101 fix #2 (Lever A): the replaces above drop the old params (reorder's old w13 +
+        # old scales), but the freed storage stays in the caching-allocator RESERVE — on this UMA
+        # node that reserve IS anon-resident RAM. Return it to the OS now (within the layer) so it
+        # can't accumulate across the 75-layer sweep. The within-layer twin of fix #1. Env-gated so
+        # the baked image is safe unconditionally; measure the effect with VLLM_DGX_LOG_LAYER_MEM.
+        if _DGX_EAGER_FREE:
+            torch.cuda.empty_cache()
+        _dgx_layer_mem("post_replace", _dgx_li)
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
@@ -1609,6 +1695,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        _dgx_layer_mem("post_2ndpass", _dgx_li)  # plans/101: end-of-layer resident
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(

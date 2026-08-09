@@ -50,6 +50,12 @@ def get_cpu_memory() -> int:
 
 _UMA_PRESSURE_THRESHOLD = 0.8
 _UMA_MIN_RELEASE_BYTES = 512 * MiB_bytes
+# plans/101 (DGX Spark GB10): once the caching-allocator slack (reserved-allocated) exceeds this,
+# reclaim it to the OS regardless of how much the OS still reports free. Without this, the OS gate
+# below (available > 20% of total) NEVER fires during the NVFP4 repack sweep on a UMA node — the
+# reserve balloons layer-by-layer (~+62 GiB over 78 MoE layers) until one layer's transient OOMs
+# the node. Reclaiming large slack between modules caps peak at allocated + one layer's transient.
+_UMA_ALWAYS_RELEASE_BYTES = 4 * GiB_bytes
 
 
 def release_device_memory_under_pressure(device: torch.device) -> bool:
@@ -69,10 +75,13 @@ def release_device_memory_under_pressure(device: torch.device) -> bool:
     if releasable < _UMA_MIN_RELEASE_BYTES:
         return False
 
-    # cudaMemGetInfo underreports free memory on UMA, see MemorySnapshot.measure
-    mem = psutil.virtual_memory()
-    if mem.available > (1 - _UMA_PRESSURE_THRESHOLD) * mem.total:
-        return False
+    # plans/101: only consult the (mis-tuned) OS-pressure gate for SMALL slack. Once slack is
+    # large, always reclaim it — otherwise this gate never fires during the repack sweep and the
+    # reserve balloons to OOM. cudaMemGetInfo underreports free on UMA, see MemorySnapshot.measure.
+    if releasable < _UMA_ALWAYS_RELEASE_BYTES:
+        mem = psutil.virtual_memory()
+        if mem.available > (1 - _UMA_PRESSURE_THRESHOLD) * mem.total:
+            return False
 
     torch.accelerator.synchronize(device)
     torch.accelerator.empty_cache()
