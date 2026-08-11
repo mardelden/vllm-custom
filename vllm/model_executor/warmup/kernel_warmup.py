@@ -153,7 +153,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         use_persistent_cache = False
 
     if not use_persistent_cache:
-        with torch.inference_mode(), fi_utils.autotune():
+        # PP deployments with one rank per node can safely use one validated
+        # persistent tactic cache per rank while preserving the all-rank
+        # autotune sequence and barrier.
+        cache_path = resolve_flashinfer_autotune_file(runner)
+        logger.info(
+            "Using per-rank persistent FlashInfer autotune cache: %s",
+            cache_path,
+        )
+        with (
+            torch.inference_mode(),
+            fi_utils.autotune(tune_mode=True, cache=str(cache_path)),
+        ):
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
                 skip_eplb=True,

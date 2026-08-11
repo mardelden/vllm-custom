@@ -1049,6 +1049,8 @@ def fastsafetensors_weights_iterator(
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
+    max_threads = envs.VLLM_FASTSAFETENSORS_MAX_THREADS
+    bounce_buffer_kb = envs.VLLM_FASTSAFETENSORS_BBUF_KB
 
     def _make_loader(nogds: bool) -> "ParallelLoader":
         return ParallelLoader(
@@ -1058,6 +1060,8 @@ def fastsafetensors_weights_iterator(
             use_tqdm_on_load=tqdm_enabled,
             device=str(device),
             nogds=nogds,
+            max_threads=max_threads,
+            bbuf_size_kb=bounce_buffer_kb,
         )
 
     # GDS can fail either at construction or lazily inside the producer

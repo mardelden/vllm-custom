@@ -644,6 +644,49 @@ def initialize_ray_cluster(
         current_ip = get_ip()
         current_node_id = ray.get_runtime_context().get_node_id()
         current_node_resource = available_resources_per_node()[current_node_id]
+
+        # Pin PP ranks to stable nodes when their prepared-weight and kernel
+        # tactic caches are node-local. Without explicit bundle constraints,
+        # Ray may exchange worker nodes between otherwise identical launches.
+        requested_node_ips_raw = os.getenv("DGX_RAY_BUNDLE_NODE_IPS", "")
+        if requested_node_ips_raw:
+            requested_node_ips = [
+                value.strip()
+                for value in requested_node_ips_raw.split(",")
+                if value.strip()
+            ]
+            if len(requested_node_ips) != parallel_config.world_size:
+                raise ValueError(
+                    "DGX_RAY_BUNDLE_NODE_IPS must contain exactly one IP per "
+                    f"world rank: world_size={parallel_config.world_size}, "
+                    f"ips={requested_node_ips}"
+                )
+            if require_gpu_on_driver and requested_node_ips[0] != current_ip:
+                raise ValueError(
+                    "DGX_RAY_BUNDLE_NODE_IPS rank 0 must be the driver IP when "
+                    f"require_gpu_on_driver is set: driver={current_ip}, "
+                    f"rank0={requested_node_ips[0]}"
+                )
+
+            cluster_resources = ray.cluster_resources()
+            missing_resources = [
+                f"node:{node_ip}"
+                for node_ip in requested_node_ips
+                if cluster_resources.get(f"node:{node_ip}", 0.0) < 0.001
+            ]
+            if missing_resources:
+                raise ValueError(
+                    "DGX_RAY_BUNDLE_NODE_IPS references unavailable Ray node "
+                    f"resources: {missing_resources}; "
+                    f"cluster_resources={cluster_resources}"
+                )
+
+            for bundle_spec, node_ip in zip(placement_group_specs, requested_node_ips):
+                bundle_spec[f"node:{node_ip}"] = 0.001
+            logger.info(
+                "DGX pinned Ray placement-group bundles to nodes: %s",
+                requested_node_ips,
+            )
         # TODO (jeffreywang): require_gpu_on_driver should be always False
         # after deprecating RayDistributedExecutor.
         if require_gpu_on_driver:

@@ -110,6 +110,21 @@ if TYPE_CHECKING:
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_FASTSAFETENSORS_MAX_THREADS: int = 16
+    VLLM_FASTSAFETENSORS_BBUF_KB: int = 16384
+    VLLM_FASTSAFETENSORS_MAX_COPY_BLOCK_MB: int = 16384
+    VLLM_WEIGHT_CACHE: str = "off"
+    VLLM_WEIGHT_CACHE_DIR: str = ""
+    VLLM_WEIGHT_CACHE_THREADS: int = 16
+    VLLM_WEIGHT_CACHE_CHUNK_MB: int = 64
+    VLLM_WEIGHT_CACHE_BBUF_KB: int = 16384
+    VLLM_WEIGHT_CACHE_FAIL_HARD: bool = False
+    VLLM_WEIGHT_CACHE_RECLAIM_WINDOW_SHARDS: int = 0
+    VLLM_WEIGHT_CACHE_SAVE_FAIL_HARD: bool = False
+    VLLM_WEIGHT_CACHE_SAVE_BARRIER: bool = False
+    VLLM_WEIGHT_CACHE_BUILD_ONLY: bool = False
+    VLLM_WEIGHT_CACHE_BUILD_SENTINEL: str = ""
+    VLLM_WEIGHT_CACHE_BOOTSTRAP: bool = False
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -1049,6 +1064,52 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
     ),
+    # These values are forwarded to fastsafetensors. Queue depth controls
+    # shard-sized residency; thread and block settings control request-level
+    # parallelism but do not make the destination shard allocation smaller.
+    "VLLM_FASTSAFETENSORS_MAX_THREADS": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_MAX_THREADS", "16")
+    ),
+    "VLLM_FASTSAFETENSORS_BBUF_KB": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_BBUF_KB", "16384")
+    ),
+    "VLLM_FASTSAFETENSORS_MAX_COPY_BLOCK_MB": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_MAX_COPY_BLOCK_MB", "16384")
+    ),
+    # Prepared post-load, pre-repack weight cache. Disabled by default.
+    "VLLM_WEIGHT_CACHE": lambda: os.getenv("VLLM_WEIGHT_CACHE", "off").strip().lower(),
+    "VLLM_WEIGHT_CACHE_DIR": lambda: os.getenv("VLLM_WEIGHT_CACHE_DIR", "").strip(),
+    "VLLM_WEIGHT_CACHE_THREADS": lambda: int(
+        os.getenv("VLLM_WEIGHT_CACHE_THREADS", "16")
+    ),
+    "VLLM_WEIGHT_CACHE_CHUNK_MB": lambda: int(
+        os.getenv("VLLM_WEIGHT_CACHE_CHUNK_MB", "64")
+    ),
+    "VLLM_WEIGHT_CACHE_BBUF_KB": lambda: int(
+        os.getenv("VLLM_WEIGHT_CACHE_BBUF_KB", "16384")
+    ),
+    "VLLM_WEIGHT_CACHE_FAIL_HARD": lambda: os.getenv("VLLM_WEIGHT_CACHE_FAIL_HARD", "0")
+    == "1",
+    "VLLM_WEIGHT_CACHE_RECLAIM_WINDOW_SHARDS": lambda: int(
+        os.getenv("VLLM_WEIGHT_CACHE_RECLAIM_WINDOW_SHARDS", "0")
+    ),
+    "VLLM_WEIGHT_CACHE_SAVE_FAIL_HARD": lambda: os.getenv(
+        "VLLM_WEIGHT_CACHE_SAVE_FAIL_HARD", "0"
+    )
+    == "1",
+    "VLLM_WEIGHT_CACHE_SAVE_BARRIER": lambda: os.getenv(
+        "VLLM_WEIGHT_CACHE_SAVE_BARRIER", "0"
+    )
+    == "1",
+    "VLLM_WEIGHT_CACHE_BUILD_ONLY": lambda: os.getenv(
+        "VLLM_WEIGHT_CACHE_BUILD_ONLY", "0"
+    )
+    == "1",
+    "VLLM_WEIGHT_CACHE_BUILD_SENTINEL": lambda: os.getenv(
+        "VLLM_WEIGHT_CACHE_BUILD_SENTINEL", ""
+    ).strip(),
+    "VLLM_WEIGHT_CACHE_BOOTSTRAP": lambda: os.getenv("VLLM_WEIGHT_CACHE_BOOTSTRAP", "0")
+    == "1",
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")

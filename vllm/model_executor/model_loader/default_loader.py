@@ -15,6 +15,12 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
+from vllm.model_executor.model_loader._dgx_weight_cache_lifecycle import (
+    all_ranks_cache_ready as _all_ranks_cache_ready,
+)
+from vllm.model_executor.model_loader._dgx_weight_cache_lifecycle import (
+    wrap_cache_save as _wrap_cache_save,
+)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
@@ -38,6 +44,118 @@ from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
+
+_WEIGHT_CACHE_FLUSH_BYTES = 2 * 1024**3
+
+
+def _weight_cache_mode() -> str:
+    return os.getenv("VLLM_WEIGHT_CACHE", "off").strip().lower()
+
+
+def _weight_cache_key(model_config: ModelConfig) -> str:
+    import hashlib
+
+    try:
+        from vllm.distributed import get_pp_group
+
+        pp_group = get_pp_group()
+        pp_identity = f"{pp_group.rank_in_group}of{pp_group.world_size}"
+    except Exception:
+        pp_identity = "0of1"
+
+    parts = [
+        str(getattr(model_config, "model", "")),
+        str(getattr(model_config, "revision", "")),
+        str(getattr(model_config, "quantization", "")),
+        str(getattr(model_config, "dtype", "")),
+        pp_identity,
+        os.getenv("VLLM_PP_LAYER_PARTITION", ""),
+        os.getenv("TORCH_CUDA_ARCH_LIST", ""),
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def _weight_cache_dir(model_config: ModelConfig) -> str:
+    base = os.getenv("VLLM_WEIGHT_CACHE_DIR", "").strip() or os.path.join(
+        os.getenv("HF_HOME", "/root/.cache"), ".vllm-weight-cache"
+    )
+    return os.path.join(base, _weight_cache_key(model_config))
+
+
+def _weight_cache_manifest(cache_dir: str) -> str:
+    return os.path.join(cache_dir, "manifest.json")
+
+
+def _weight_cache_valid(cache_dir: str) -> bool:
+    import json
+
+    manifest_path = _weight_cache_manifest(cache_dir)
+    if not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not manifest.get("complete"):
+        return False
+    return all(
+        os.path.isfile(os.path.join(cache_dir, filename))
+        for filename in manifest.get("files", [])
+    )
+
+
+@_wrap_cache_save
+def _save_weight_cache(model: nn.Module, cache_dir: str) -> None:
+    import json
+
+    from safetensors.torch import save_file
+
+    os.makedirs(cache_dir, exist_ok=True)
+    files: list[str] = []
+    batch: dict[str, torch.Tensor] = {}
+    batch_bytes = 0
+    shard_index = 0
+    parameter_count = 0
+
+    def flush() -> None:
+        nonlocal batch, batch_bytes, shard_index
+        if not batch:
+            return
+        filename = f"shard-{shard_index:05d}.safetensors"
+        save_file(batch, os.path.join(cache_dir, filename))
+        files.append(filename)
+        shard_index += 1
+        batch = {}
+        batch_bytes = 0
+
+    for name, tensor in model.state_dict().items():
+        cached_tensor = tensor.detach().to("cpu").contiguous()
+        batch[name] = cached_tensor
+        parameter_count += 1
+        batch_bytes += cached_tensor.numel() * cached_tensor.element_size()
+        if batch_bytes >= _WEIGHT_CACHE_FLUSH_BYTES:
+            flush()
+    flush()
+
+    manifest_path = _weight_cache_manifest(cache_dir)
+    temporary_path = f"{manifest_path}.tmp"
+    with open(temporary_path, "w", encoding="utf-8") as manifest_file:
+        json.dump(
+            {
+                "complete": True,
+                "files": files,
+                "nparam": parameter_count,
+            },
+            manifest_file,
+        )
+    os.replace(temporary_path, manifest_path)
+
+
+def _restore_weight_cache(model: nn.Module, cache_dir: str) -> None:
+    from ._dgx_staged_cache_restore import restore
+
+    restore(model, cache_dir)
 
 
 class DefaultModelLoader(BaseModelLoader):
@@ -424,6 +542,47 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
+        cache_mode = _weight_cache_mode()
+        cache_dir = _weight_cache_dir(model_config) if cache_mode != "off" else None
+        if self.counter_before_loading_weights == 0.0:
+            self.counter_before_loading_weights = time.perf_counter()
+
+        local_cache_valid = bool(cache_dir and _weight_cache_valid(cache_dir))
+        cache_ready = local_cache_valid
+        if (
+            cache_mode == "auto"
+            and os.getenv("VLLM_WEIGHT_CACHE_BUILD_ONLY", "0") == "1"
+        ):
+            cache_ready = _all_ranks_cache_ready(local_cache_valid)
+
+        if cache_mode in ("load", "auto") and cache_dir and cache_ready:
+            try:
+                _restore_weight_cache(model, cache_dir)
+                self.counter_after_loading_weights = time.perf_counter()
+                logger.info_once(
+                    "Loading weights took %.2f seconds (weight-cache HIT: %s)",
+                    self.counter_after_loading_weights
+                    - self.counter_before_loading_weights,
+                    cache_dir,
+                )
+                return
+            except Exception as error:
+                logger.warning(
+                    "weight-cache restore failed (%s); cold-loading normally",
+                    error,
+                )
+
+        if (
+            cache_mode == "load"
+            and cache_dir
+            and not local_cache_valid
+            and os.getenv("VLLM_WEIGHT_CACHE_FAIL_HARD", "0") == "1"
+        ):
+            raise RuntimeError(
+                "strict weight-cache load requested but no complete generation "
+                f"exists at {cache_dir}"
+            )
+
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
@@ -443,6 +602,13 @@ class DefaultModelLoader(BaseModelLoader):
         )
         if enable_weights_track:
             self.track_weights_loading(model, loaded_weights)
+
+        if cache_mode in ("save", "auto") and cache_dir:
+            try:
+                _save_weight_cache(model, cache_dir)
+                logger.info_once("weight-cache SAVED: %s", cache_dir)
+            except Exception as error:
+                logger.warning("weight-cache save failed: %s", error)
 
     def track_weights_loading(
         self, model: nn.Module, loaded_weights: set[str] | None
