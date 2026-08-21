@@ -7,15 +7,36 @@ Covers the fix for num_frames-based timestamp calculation
 """
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
+from vllm.model_executor.models.qwen3_vl import Qwen3VLDummyInputsBuilder
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...utils import build_model_context
 
 MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+
+
+def test_warmup_inputs_avoid_maximum_media_sizing() -> None:
+    info = MagicMock()
+    info.ctx.tokenizer = None
+    info.parse_mm_data.side_effect = lambda data, validate: data
+    builder = Qwen3VLDummyInputsBuilder(info)
+
+    inputs = builder.get_warmup_processor_inputs(
+        seq_len=262144,
+        mm_counts={"image": 1, "video": 1},
+        mm_options={},
+    )
+
+    assert inputs.mm_data_items["image"][0].size == (1, 1)
+    video, _ = inputs.mm_data_items["video"][0]
+    assert video.shape == (2, 1, 1, 3)
+    info.get_image_size_with_most_features.assert_not_called()
+    info.get_video_processor.assert_not_called()
 
 
 def _build_video_mm_data(

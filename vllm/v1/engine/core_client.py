@@ -120,6 +120,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        post_engine_launch_callback: Callable[[], None] | None = None,
     ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -129,6 +130,7 @@ class EngineCoreClient(ABC):
             client_addresses,
             client_count,
             client_index,
+            post_engine_launch_callback,
         )
         if parallel_config.data_parallel_size > 1:
             if parallel_config.data_parallel_external_lb:
@@ -520,6 +522,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: dict[str, Any] | None = None,
+        post_engine_launch_callback: Callable[[], None] | None = None,
     ):
         self.vllm_config = vllm_config
 
@@ -614,12 +617,17 @@ class MPClient(EngineCoreClient):
                     coordinator = engine_launch.coordinator
                     addresses = engine_launch.addresses
                     tensor_queue = engine_launch.tensor_queue
+                    if post_engine_launch_callback is not None:
+                        post_engine_launch_callback()
 
                 self.stats_update_address = addresses.frontend_stats_publish_address
                 if coordinator is not None:
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
+
+            if client_addresses and post_engine_launch_callback is not None:
+                post_engine_launch_callback()
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             tensor_ipc_sender: TensorIpcSender | None = None
@@ -987,6 +995,7 @@ class AsyncMPClient(MPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        post_engine_launch_callback: Callable[[], None] | None = None,
     ):
         super().__init__(
             asyncio_mode=True,
@@ -994,6 +1003,7 @@ class AsyncMPClient(MPClient):
             executor_class=executor_class,
             log_stats=log_stats,
             client_addresses=client_addresses,
+            post_engine_launch_callback=post_engine_launch_callback,
         )
 
         self.client_count = client_count
@@ -1262,6 +1272,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        post_engine_launch_callback: Callable[[], None] | None = None,
     ):
         self.current_wave = 0
 
@@ -1272,6 +1283,7 @@ class DPAsyncMPClient(AsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            post_engine_launch_callback,
         )
 
         # List of [waiting, running, kv_cache_usage] per engine.
@@ -1444,6 +1456,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        post_engine_launch_callback: Callable[[], None] | None = None,
     ):
         self.client_count = client_count
 
@@ -1460,6 +1473,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             client_addresses,
             client_count,
             client_index,
+            post_engine_launch_callback,
         )
 
         assert len(self.core_engines) > 1

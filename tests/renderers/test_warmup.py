@@ -4,8 +4,9 @@
 
 These tests exercise:
   - Zero-limit modalities are filtered from mm_counts passed to
-    get_dummy_processor_inputs (e.g. --limit-mm-per-prompt image=0 ...)
+    get_warmup_processor_inputs (e.g. --limit-mm-per-prompt image=0 ...)
   - MM warmup is skipped entirely when mm_processor is None
+  - Background MM warmup is started once and joined by warmup()
 
 No model weights are required: warmup() is called directly on a MagicMock
 that acts as the renderer instance.
@@ -35,7 +36,11 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     mm_processor.info.allowed_mm_limits = mm_limits
     renderer.mm_processor = mm_processor
     renderer._readonly_mm_processor = None
+    renderer._mm_warmup_future = None
     renderer._warmup_mm_processor = BaseRenderer._warmup_mm_processor.__get__(
+        renderer, BaseRenderer
+    )
+    renderer._warmup_mm_processors = BaseRenderer._warmup_mm_processors.__get__(
         renderer, BaseRenderer
     )
     renderer._clear_processor_cache = BaseRenderer._clear_processor_cache
@@ -56,7 +61,7 @@ class TestMmWarmupZeroLimitFiltering:
         with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.dummy_inputs.get_warmup_processor_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert "video" not in kwargs["mm_counts"]
@@ -69,7 +74,7 @@ class TestMmWarmupZeroLimitFiltering:
         with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.dummy_inputs.get_warmup_processor_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {}
@@ -81,7 +86,7 @@ class TestMmWarmupZeroLimitFiltering:
         with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
-        get_inputs = renderer.mm_processor.dummy_inputs.get_dummy_processor_inputs
+        get_inputs = renderer.mm_processor.dummy_inputs.get_warmup_processor_inputs
         get_inputs.assert_called_once()
         _, kwargs = get_inputs.call_args
         assert kwargs["mm_counts"] == {"image": 1, "video": 1}
@@ -133,3 +138,29 @@ class TestReadonlyMmWarmup:
 
         readonly_mm_processor.apply.assert_called_once()
         readonly_mm_processor.cache.clear_cache.assert_called_once()
+
+
+class TestBackgroundMmWarmup:
+    def test_start_submits_warmup_once(self):
+        renderer = _make_renderer_mock({"image": 1})
+        renderer._mm_executor = MagicMock()
+        future = renderer._mm_executor.submit.return_value
+
+        BaseRenderer.start_mm_warmup(renderer)
+        BaseRenderer.start_mm_warmup(renderer)
+
+        renderer._mm_executor.submit.assert_called_once_with(
+            renderer._warmup_mm_processors
+        )
+        assert renderer._mm_warmup_future is future
+
+    def test_warmup_joins_background_work(self):
+        renderer = _make_renderer_mock({"image": 1})
+        renderer._warmup_mm_processors = MagicMock(wraps=renderer._warmup_mm_processors)
+        future = MagicMock()
+        renderer._mm_warmup_future = future
+
+        BaseRenderer.warmup(renderer, ChatParams())
+
+        future.result.assert_called_once_with()
+        renderer._warmup_mm_processors.assert_not_called()

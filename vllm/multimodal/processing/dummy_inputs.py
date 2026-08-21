@@ -79,8 +79,15 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
         """
-        dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        return self._build_processor_inputs(mm_counts, dummy_mm_data)
+
+    def _build_processor_inputs(
+        self,
+        mm_counts: Mapping[str, int],
+        dummy_mm_data: MultiModalDataDict,
+    ) -> ProcessorInputs:
+        dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         tokenizer = self.info.ctx.tokenizer
@@ -100,6 +107,15 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             prompt=dummy_prompt,
             mm_data_items=dummy_mm_items,
         )
+
+    def get_warmup_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> ProcessorInputs:
+        """Build lightweight inputs for initializing the processing path."""
+        return self.get_dummy_processor_inputs(seq_len, mm_counts, mm_options)
 
     def _get_dummy_audios(
         self,

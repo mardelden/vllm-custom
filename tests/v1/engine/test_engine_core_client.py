@@ -112,10 +112,12 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
     core_client_mod = _reload_core_client_module()
 
     poll_timeouts: list[int] = []
+    startup_events: list[str] = []
 
     class ShadowSocket:
         def poll(self, timeout: int) -> int:
             # Capture the timeout value for each poll call
+            startup_events.append("ready_poll")
             poll_timeouts.append(timeout)
             return 1
 
@@ -169,10 +171,12 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
             "input_address": "inproc://input",
             "output_address": "inproc://output",
         },
+        post_engine_launch_callback=lambda: startup_events.append("callback"),
     )
     try:
         # timeout_value is in seconds, but poll receives milliseconds
         assert poll_timeouts == [timeout_value * 1000]
+        assert startup_events == ["callback", "ready_poll"]
     finally:
         client.shutdown()
 

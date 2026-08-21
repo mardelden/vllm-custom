@@ -4,7 +4,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -88,6 +88,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
         self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
+        self._mm_warmup_future: Future[None] | None = None
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -224,7 +225,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_limits = {k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0}
 
         start_time = time.perf_counter()
-        processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+        processor_inputs = processor.dummy_inputs.get_warmup_processor_inputs(
             seq_len=model_config.max_model_len,
             mm_counts=dict.fromkeys(mm_limits, 1),
             mm_options=mm_config.limit_per_prompt,
@@ -233,6 +234,40 @@ class BaseRenderer(ABC, Generic[_T]):
 
         elapsed = time.perf_counter() - start_time
         logger.info("%s warmup completed in %.3fs", log_prefix, elapsed)
+
+    def _warmup_mm_processors(self) -> None:
+        # prevent MM processor hangs
+        with set_default_torch_num_threads(1):
+            if self.mm_processor:
+                try:
+                    logger.debug("Warming up multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self.mm_processor,
+                        log_prefix="Multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Multi-modal warmup failed")
+                finally:
+                    self.clear_mm_cache()
+
+            if self._readonly_mm_processor is not None:
+                try:
+                    logger.debug("Warming up readonly multi-modal processing...")
+                    self._warmup_mm_processor(
+                        self._readonly_mm_processor,
+                        log_prefix="Readonly multi-modal",
+                    )
+                except Exception:
+                    logger.warning("Readonly multi-modal warmup failed")
+                finally:
+                    self._clear_processor_cache(self._readonly_mm_processor)
+
+    def start_mm_warmup(self) -> None:
+        """Start MM processor warmup in the renderer's serial executor."""
+        if self.mm_processor is not None and self._mm_warmup_future is None:
+            self._mm_warmup_future = self._mm_executor.submit(
+                self._warmup_mm_processors
+            )
 
     def warmup(self, chat_params: ChatParams) -> None:
         """
@@ -258,29 +293,10 @@ class BaseRenderer(ABC, Generic[_T]):
             except Exception:
                 logger.warning("Chat template warmup failed", exc_info=True)
 
-            if self.mm_processor:
-                try:
-                    logger.debug("Warming up multi-modal processing...")
-                    self._warmup_mm_processor(
-                        self.mm_processor,
-                        log_prefix="Multi-modal",
-                    )
-                except Exception:
-                    logger.warning("Multi-modal warmup failed")
-                finally:
-                    self.clear_mm_cache()
-
-            if self._readonly_mm_processor is not None:
-                try:
-                    logger.debug("Warming up readonly multi-modal processing...")
-                    self._warmup_mm_processor(
-                        self._readonly_mm_processor,
-                        log_prefix="Readonly multi-modal",
-                    )
-                except Exception:
-                    logger.warning("Readonly multi-modal warmup failed")
-                finally:
-                    self._clear_processor_cache(self._readonly_mm_processor)
+        if self._mm_warmup_future is None:
+            self._warmup_mm_processors()
+        else:
+            self._mm_warmup_future.result()
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid

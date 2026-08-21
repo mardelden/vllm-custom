@@ -90,6 +90,7 @@ from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -1091,6 +1092,29 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         video_token = "<|vision_start|><|video_pad|><|vision_end|>"
 
         return image_token * num_images + video_token * num_videos
+
+    def get_warmup_processor_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        dummy_mm_data = {
+            "image": self._get_dummy_images(
+                width=1,
+                height=1,
+                num_images=num_images,
+            ),
+            "video": self._get_dummy_videos(
+                width=1,
+                height=1,
+                num_frames=2,
+                num_videos=num_videos,
+            ),
+        }
+        return self._build_processor_inputs(mm_counts, dummy_mm_data)
 
     def get_dummy_mm_data(
         self,

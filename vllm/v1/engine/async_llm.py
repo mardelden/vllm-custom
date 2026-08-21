@@ -153,6 +153,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            post_engine_launch_callback=renderer.start_mm_warmup,
         )
 
         # Loggers.
