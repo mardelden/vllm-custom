@@ -367,6 +367,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "safetensors_pinned_chunk_size",
+                "safetensors_pinned_buffer_size",
+                "safetensors_pinned_gap_size",
             }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
@@ -445,6 +448,11 @@ class EngineArgs:
     )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
+    safetensors_pinned_num_threads: int = LoadConfig.safetensors_pinned_num_threads
+    safetensors_pinned_chunk_size: int = LoadConfig.safetensors_pinned_chunk_size
+    safetensors_pinned_buffer_size: int = LoadConfig.safetensors_pinned_buffer_size
+    safetensors_pinned_gap_size: int = LoadConfig.safetensors_pinned_gap_size
+    safetensors_pinned_prefetch: bool = LoadConfig.safetensors_pinned_prefetch
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -955,6 +963,26 @@ class EngineArgs:
         load_group.add_argument(
             "--safetensors-prefetch-block-size",
             **load_kwargs["safetensors_prefetch_block_size"],
+        )
+        load_group.add_argument(
+            "--safetensors-pinned-num-threads",
+            **load_kwargs["safetensors_pinned_num_threads"],
+        )
+        load_group.add_argument(
+            "--safetensors-pinned-chunk-size",
+            **load_kwargs["safetensors_pinned_chunk_size"],
+        )
+        load_group.add_argument(
+            "--safetensors-pinned-buffer-size",
+            **load_kwargs["safetensors_pinned_buffer_size"],
+        )
+        load_group.add_argument(
+            "--safetensors-pinned-gap-size",
+            **load_kwargs["safetensors_pinned_gap_size"],
+        )
+        load_group.add_argument(
+            "--safetensors-pinned-prefetch",
+            **load_kwargs["safetensors_pinned_prefetch"],
         )
         load_group.add_argument(
             "--model-loader-extra-config", **load_kwargs["model_loader_extra_config"]
@@ -1840,6 +1868,11 @@ class EngineArgs:
             safetensors_load_strategy=self.safetensors_load_strategy,
             safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
             safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
+            safetensors_pinned_num_threads=self.safetensors_pinned_num_threads,
+            safetensors_pinned_chunk_size=self.safetensors_pinned_chunk_size,
+            safetensors_pinned_buffer_size=self.safetensors_pinned_buffer_size,
+            safetensors_pinned_gap_size=self.safetensors_pinned_gap_size,
+            safetensors_pinned_prefetch=self.safetensors_pinned_prefetch,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,

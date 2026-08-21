@@ -11,7 +11,13 @@ from vllm.utils.hashing import safe_hash
 
 DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
-SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
+DEFAULT_SAFETENSORS_PINNED_NUM_THREADS = 16
+DEFAULT_SAFETENSORS_PINNED_CHUNK_SIZE = 32 * 1024 * 1024
+DEFAULT_SAFETENSORS_PINNED_BUFFER_SIZE = 384 * 1024 * 1024
+DEFAULT_SAFETENSORS_PINNED_GAP_SIZE = 8 * 1024 * 1024
+SafetensorsLoadStrategy: TypeAlias = Literal[
+    "lazy", "eager", "prefetch", "pinned", "torchao"
+]
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
@@ -76,6 +82,10 @@ class LoadConfig:
     - "prefetch": Checkpoint files are read into the OS page cache before
       workers load them, speeding up the model loading phase. Useful on
       network or high-latency storage.
+    - "pinned": Checkpoint data is read in parallel into a bounded pool of
+      pinned CPU buffers before being passed to the model. This can improve
+      host-to-device copies from fast local storage, at the cost of extra host
+      memory. This strategy is experimental and requires pinned-memory support.
     - "torchao": Weights are loaded in upfront and then reconstructed
       into torchao tensor subclasses. This is used when the checkpoint
       was quantized using torchao and saved using safetensors.
@@ -90,6 +100,29 @@ class LoadConfig:
         default=DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE, ge=1
     )
     """Read size in bytes for each safetensors checkpoint file prefetch."""
+    safetensors_pinned_num_threads: int = Field(
+        default=DEFAULT_SAFETENSORS_PINNED_NUM_THREADS, ge=1
+    )
+    """Number of reader threads used by the pinned safetensors strategy."""
+    safetensors_pinned_chunk_size: int = Field(
+        default=DEFAULT_SAFETENSORS_PINNED_CHUNK_SIZE, ge=1
+    )
+    """Read request size in bytes for the pinned safetensors strategy."""
+    safetensors_pinned_buffer_size: int = Field(
+        default=DEFAULT_SAFETENSORS_PINNED_BUFFER_SIZE, ge=1
+    )
+    """Size in bytes of each reusable pinned staging buffer. The loader uses
+    three buffers with prefetching enabled and two otherwise. A tensor larger
+    than this value requires a temporary buffer large enough for that tensor."""
+    safetensors_pinned_gap_size: int = Field(
+        default=DEFAULT_SAFETENSORS_PINNED_GAP_SIZE, ge=0
+    )
+    """Maximum number of skipped bytes to read across when coalescing adjacent
+    tensors into one pinned staging-buffer request."""
+    safetensors_pinned_prefetch: bool = True
+    """Whether the pinned strategy overlaps the next staged read with model
+    weight processing. Disabling this reduces the staging pool from three
+    buffers to two, but removes read/processing overlap."""
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""

@@ -8,6 +8,7 @@ import fnmatch
 import glob
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
@@ -15,6 +16,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
@@ -30,6 +32,10 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.load import (
+    DEFAULT_SAFETENSORS_PINNED_BUFFER_SIZE,
+    DEFAULT_SAFETENSORS_PINNED_CHUNK_SIZE,
+    DEFAULT_SAFETENSORS_PINNED_GAP_SIZE,
+    DEFAULT_SAFETENSORS_PINNED_NUM_THREADS,
     DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
     DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     LoadConfig,
@@ -47,6 +53,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.platform_utils import is_pin_memory_available
 
 try:
     from runai_model_streamer import SafetensorsStreamer
@@ -826,6 +833,273 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+@dataclass(frozen=True)
+class _SafetensorsHeaderEntry:
+    name: str
+    dtype: torch.dtype
+    shape: tuple[int, ...]
+    start: int
+    end: int
+
+    @property
+    def nbytes(self) -> int:
+        return self.end - self.start
+
+
+@dataclass(frozen=True)
+class _PinnedReadGroup:
+    first_entry: int
+    end_entry: int
+    start: int
+    end: int
+
+    @property
+    def nbytes(self) -> int:
+        return self.end - self.start
+
+
+_SAFETENSORS_TORCH_DTYPES: dict[str, torch.dtype] = {
+    "BOOL": torch.bool,
+    "U8": torch.uint8,
+    "I8": torch.int8,
+    "I16": torch.int16,
+    "I32": torch.int32,
+    "I64": torch.int64,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+}
+for _safetensors_dtype, _torch_dtype in (
+    ("U16", "uint16"),
+    ("U32", "uint32"),
+    ("U64", "uint64"),
+    ("F8_E4M3", "float8_e4m3fn"),
+    ("F8_E4M3FNUZ", "float8_e4m3fnuz"),
+    ("F8_E5M2", "float8_e5m2"),
+    ("F8_E5M2FNUZ", "float8_e5m2fnuz"),
+    ("F8_E8M0", "float8_e8m0fnu"),
+):
+    if (_dtype := getattr(torch, _torch_dtype, None)) is not None:
+        _SAFETENSORS_TORCH_DTYPES[_safetensors_dtype] = _dtype
+
+
+def _read_safetensors_header(
+    path: str,
+) -> tuple[list[_SafetensorsHeaderEntry], int]:
+    """Parse and validate the metadata needed for bounded raw reads."""
+    file_size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        header_size_bytes = f.read(8)
+        if len(header_size_bytes) != 8:
+            raise ValueError(f"Invalid safetensors header in {path!r}")
+        header_size = int.from_bytes(header_size_bytes, byteorder="little")
+        if header_size > file_size - 8:
+            raise ValueError(f"Invalid safetensors header size in {path!r}")
+        header = json.loads(f.read(header_size))
+
+    if not isinstance(header, dict):
+        raise ValueError(f"Invalid safetensors metadata in {path!r}")
+
+    data_start = 8 + header_size
+    data_size = file_size - data_start
+    entries: list[_SafetensorsHeaderEntry] = []
+    for name, metadata in header.items():
+        if name == "__metadata__":
+            continue
+        if not isinstance(name, str) or not isinstance(metadata, dict):
+            raise ValueError(f"Invalid tensor metadata in {path!r}")
+
+        dtype_name = metadata.get("dtype")
+        shape_value = metadata.get("shape")
+        offsets = metadata.get("data_offsets")
+        if (
+            not isinstance(dtype_name, str)
+            or not isinstance(shape_value, list)
+            or any(type(dim) is not int or dim < 0 for dim in shape_value)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(type(offset) is not int for offset in offsets)
+        ):
+            raise ValueError(f"Invalid metadata for tensor {name!r} in {path!r}")
+
+        dtype = _SAFETENSORS_TORCH_DTYPES.get(dtype_name)
+        if dtype is None:
+            raise ValueError(
+                f"The pinned safetensors strategy does not support dtype "
+                f"{dtype_name!r} used by tensor {name!r}; use the lazy strategy"
+            )
+
+        start, end = offsets
+        if start < 0 or end < start or end > data_size:
+            raise ValueError(f"Invalid offsets for tensor {name!r} in {path!r}")
+
+        shape = tuple(shape_value)
+        expected_nbytes = math.prod(shape) * torch.empty((), dtype=dtype).element_size()
+        if end - start != expected_nbytes:
+            raise ValueError(f"Invalid byte size for tensor {name!r} in {path!r}")
+        entries.append(_SafetensorsHeaderEntry(name, dtype, shape, start, end))
+
+    entries.sort(key=lambda entry: entry.start)
+    previous_end = 0
+    for entry in entries:
+        if entry.start < previous_end:
+            raise ValueError(f"Overlapping tensor data in {path!r}")
+        previous_end = entry.end
+    return entries, data_start
+
+
+def _plan_pinned_read_groups(
+    entries: list[_SafetensorsHeaderEntry], buffer_size: int, gap_size: int
+) -> list[_PinnedReadGroup]:
+    """Coalesce adjacent tensors without exceeding the configured buffer size."""
+    groups: list[_PinnedReadGroup] = []
+    first_entry = 0
+    while first_entry < len(entries):
+        group_start = entries[first_entry].start
+        end_entry = first_entry + 1
+        while end_entry < len(entries):
+            entry = entries[end_entry]
+            previous = entries[end_entry - 1]
+            if entry.end - group_start > buffer_size:
+                break
+            if entry.start - previous.end > gap_size:
+                break
+            end_entry += 1
+        groups.append(
+            _PinnedReadGroup(
+                first_entry,
+                end_entry,
+                group_start,
+                entries[end_entry - 1].end,
+            )
+        )
+        first_entry = end_entry
+    return groups
+
+
+def _pread_exact(fd: int, target: memoryview, offset: int) -> None:
+    completed = 0
+    while completed < len(target):
+        read = os.preadv(fd, [target[completed:]], offset + completed)
+        if read <= 0:
+            raise EOFError(f"Short checkpoint read at byte offset {offset + completed}")
+        completed += read
+
+
+def _pinned_safetensors_file_iterator(
+    path: str,
+    *,
+    local_expert_ids: set[int] | None,
+    num_threads: int,
+    chunk_size: int,
+    buffer_size: int,
+    gap_size: int,
+    prefetch: bool,
+    stage_buffers: list[torch.Tensor | None],
+    stage_buffer_cursor: list[int],
+    pin_memory: bool = True,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Read one shard into a rotating, bounded pinned-memory staging pool.
+
+    Tensors are views into reusable buffers and must be consumed before the
+    iterator advances far enough to reuse that buffer. This matches the model
+    loader's streaming iterator contract and avoids retaining a full shard.
+    """
+    entries, data_start = _read_safetensors_header(path)
+    entries = [
+        entry
+        for entry in entries
+        if not should_skip_weight(entry.name, local_expert_ids)
+    ]
+    if not entries:
+        return
+
+    groups = _plan_pinned_read_groups(entries, buffer_size, gap_size)
+    fd = os.open(path, os.O_RDONLY)
+
+    def allocate_buffer(size: int) -> torch.Tensor:
+        try:
+            return torch.empty(
+                size, dtype=torch.uint8, device="cpu", pin_memory=pin_memory
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Unable to allocate a {size / 1024**2:.2f} MiB pinned "
+                "safetensors staging buffer"
+            ) from exc
+
+    def get_buffer(group_index: int, size: int) -> torch.Tensor:
+        if size > buffer_size:
+            # The iterator API yields complete tensors, so one tensor may exceed
+            # the configured reusable-buffer size. Keep that exception local to
+            # this group and release it as soon as the consumer advances.
+            return allocate_buffer(size)
+        buffer_index = (stage_buffer_cursor[0] + group_index) % len(stage_buffers)
+        buffer = stage_buffers[buffer_index]
+        if buffer is None:
+            buffer = allocate_buffer(buffer_size)
+            stage_buffers[buffer_index] = buffer
+        return buffer
+
+    def submit_group(
+        executor: concurrent.futures.ThreadPoolExecutor, group_index: int
+    ) -> tuple[torch.Tensor, list[concurrent.futures.Future[None]]]:
+        group = groups[group_index]
+        buffer = get_buffer(group_index, group.nbytes)
+        byte_view = buffer.numpy().data.cast("B")
+        futures: list[concurrent.futures.Future[None]] = []
+        for relative_offset in range(0, group.nbytes, chunk_size):
+            size = min(chunk_size, group.nbytes - relative_offset)
+            target = byte_view[relative_offset : relative_offset + size]
+            futures.append(
+                executor.submit(
+                    _pread_exact,
+                    fd,
+                    target,
+                    data_start + group.start + relative_offset,
+                )
+            )
+        return buffer, futures
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=num_threads, thread_name_prefix="safetensors-pinned"
+        ) as executor:
+            pending = submit_group(executor, 0)
+            try:
+                for group_index, group in enumerate(groups):
+                    buffer, futures = pending
+                    for future in futures:
+                        future.result()
+
+                    if prefetch and group_index + 1 < len(groups):
+                        pending = submit_group(executor, group_index + 1)
+
+                    for entry in entries[group.first_entry : group.end_entry]:
+                        relative_start = entry.start - group.start
+                        relative_end = entry.end - group.start
+                        raw = buffer[relative_start:relative_end]
+                        try:
+                            tensor = raw.view(entry.dtype).view(entry.shape)
+                        except RuntimeError:
+                            # Safetensors permits offsets that are not naturally
+                            # aligned for a dtype. Copy only those unusual tensors.
+                            tensor = allocate_buffer(entry.nbytes).view(entry.dtype)
+                            tensor = tensor.view(entry.shape)
+                            tensor.view(-1).view(torch.uint8).copy_(raw)
+                        yield entry.name, tensor
+
+                    if not prefetch and group_index + 1 < len(groups):
+                        pending = submit_group(executor, group_index + 1)
+            finally:
+                for future in pending[1]:
+                    future.cancel()
+    finally:
+        stage_buffer_cursor[0] += len(groups)
+        os.close(fd)
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -834,6 +1108,11 @@ def safetensors_weights_iterator(
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
+    safetensors_pinned_num_threads: int = DEFAULT_SAFETENSORS_PINNED_NUM_THREADS,
+    safetensors_pinned_chunk_size: int = DEFAULT_SAFETENSORS_PINNED_CHUNK_SIZE,
+    safetensors_pinned_buffer_size: int = DEFAULT_SAFETENSORS_PINNED_BUFFER_SIZE,
+    safetensors_pinned_gap_size: int = DEFAULT_SAFETENSORS_PINNED_GAP_SIZE,
+    safetensors_pinned_prefetch: bool = True,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
@@ -844,6 +1123,8 @@ def safetensors_weights_iterator(
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
+    elif safetensors_load_strategy == "pinned":
+        loading_desc += " (pinned)"
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
@@ -910,6 +1191,51 @@ def safetensors_weights_iterator(
             num_prefetch_threads=safetensors_prefetch_num_threads,
             block_size=safetensors_prefetch_block_size,
         )
+
+    if safetensors_load_strategy == "pinned":
+        if not hasattr(os, "preadv"):
+            raise RuntimeError(
+                "safetensors_load_strategy='pinned' requires os.preadv support"
+            )
+        if not is_pin_memory_available():
+            raise RuntimeError(
+                "safetensors_load_strategy='pinned' requires pinned-memory support"
+            )
+
+        num_buffers = 3 if safetensors_pinned_prefetch else 2
+        stage_buffers: list[torch.Tensor | None] = [None] * num_buffers
+        stage_buffer_cursor = [0]
+        logger.info_once(
+            "Pinned safetensors staging uses %d reusable buffers of %.2f MiB "
+            "(%.2f MiB total), %d reader threads, and %.2f MiB read chunks.",
+            num_buffers,
+            safetensors_pinned_buffer_size / 1024**2,
+            num_buffers * safetensors_pinned_buffer_size / 1024**2,
+            safetensors_pinned_num_threads,
+            safetensors_pinned_chunk_size / 1024**2,
+        )
+
+        try:
+            for st_file in tqdm(
+                sorted_files,
+                desc=loading_desc,
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+            ):
+                yield from _pinned_safetensors_file_iterator(
+                    st_file,
+                    local_expert_ids=local_expert_ids,
+                    num_threads=safetensors_pinned_num_threads,
+                    chunk_size=safetensors_pinned_chunk_size,
+                    buffer_size=safetensors_pinned_buffer_size,
+                    gap_size=safetensors_pinned_gap_size,
+                    prefetch=safetensors_pinned_prefetch,
+                    stage_buffers=stage_buffers,
+                    stage_buffer_cursor=stage_buffer_cursor,
+                )
+        finally:
+            stage_buffers.clear()
+        return
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(

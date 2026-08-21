@@ -295,6 +295,21 @@ class DefaultModelLoader(BaseModelLoader):
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
                         ),
+                        safetensors_pinned_num_threads=(
+                            self.load_config.safetensors_pinned_num_threads
+                        ),
+                        safetensors_pinned_chunk_size=(
+                            self.load_config.safetensors_pinned_chunk_size
+                        ),
+                        safetensors_pinned_buffer_size=(
+                            self.load_config.safetensors_pinned_buffer_size
+                        ),
+                        safetensors_pinned_gap_size=(
+                            self.load_config.safetensors_pinned_gap_size
+                        ),
+                        safetensors_pinned_prefetch=(
+                            self.load_config.safetensors_pinned_prefetch
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
