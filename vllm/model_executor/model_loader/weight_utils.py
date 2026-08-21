@@ -831,21 +831,26 @@ def safetensors_weights_iterator(
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
+    weight_name_filter: Callable[[str], bool] | None = None,
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files.
 
-    When *local_expert_ids* is provided, expert weights not belonging to
-    this rank are skipped **before** reading from disk, which drastically
-    reduces storage I/O for MoE models under EP.
+    When *local_expert_ids* or *weight_name_filter* is provided, rejected
+    tensors are skipped **before** reading from disk.
     """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+
+    def should_skip(name: str) -> bool:
+        return should_skip_weight(name, local_expert_ids) or (
+            weight_name_filter is not None and not weight_name_filter(name)
+        )
 
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
@@ -922,7 +927,7 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
+                if not should_skip(name):
                     yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
@@ -939,7 +944,7 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip(name):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -957,7 +962,7 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip(name):
                         continue
                     param = f.get_tensor(name)
                     yield name, param

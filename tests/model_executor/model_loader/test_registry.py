@@ -61,6 +61,32 @@ def test_default_loader_rejects_multithread_with_non_lazy_strategy():
         )
 
 
+def test_default_loader_pp_filter_matches_missing_prefixes():
+    loader = DefaultModelLoader(LoadConfig(load_format="safetensors"))
+    loader.pp_missing_layer_names = (
+        "model.layers.0.",
+        "model.layers.1.",
+        "lm_head.",
+    )
+
+    weight_filter = loader._get_pp_weight_filter("")
+    assert weight_filter is not None
+    assert not weight_filter("model.layers.0.self_attn.q_proj.weight")
+    assert weight_filter("model.layers.10.self_attn.q_proj.weight")
+    assert weight_filter("model.embed_tokens.weight")
+    assert not weight_filter("lm_head.weight")
+
+
+def test_default_loader_pp_filter_applies_secondary_prefix():
+    loader = DefaultModelLoader(LoadConfig(load_format="safetensors"))
+    loader.pp_missing_layer_names = ("draft_model.layers.0.",)
+
+    weight_filter = loader._get_pp_weight_filter("draft_model.")
+    assert weight_filter is not None
+    assert not weight_filter("layers.0.self_attn.q_proj.weight")
+    assert weight_filter("layers.1.self_attn.q_proj.weight")
+
+
 def test_default_loader_explicit_safetensors_does_not_misread_pt(tmp_path):
     # Explicit safetensors must not fall back to a .pt and open it as safetensors.
     (tmp_path / "model.pt").write_bytes(b"\x00\x00\x00\x00")

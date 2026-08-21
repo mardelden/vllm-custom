@@ -56,6 +56,20 @@ vllm serve gpt2 \
      --pipeline-parallel-size 2
 ```
 
+For models whose checkpoint layer prefixes match their vLLM module prefixes,
+the default lazy safetensors loader can skip tensors owned by other pipeline
+stages before reading their payloads:
+
+```bash
+vllm serve <model> \
+     --pipeline-parallel-size 2 \
+     --enable-pp-weight-filter
+```
+
+This optimization is opt-in because models with custom checkpoint-to-module
+prefix mappings must continue filtering after their model-specific name mapping.
+It cannot be combined with eager or multi-thread safetensors loading.
+
 ## Multi-node deployment
 
 If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.

@@ -496,6 +496,7 @@ class EngineArgs:
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
+    enable_pp_weight_filter: bool = ParallelConfig.enable_pp_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
@@ -1154,6 +1155,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-ep-weight-filter",
             **parallel_kwargs["enable_ep_weight_filter"],
+        )
+        parallel_group.add_argument(
+            "--enable-pp-weight-filter",
+            **parallel_kwargs["enable_pp_weight_filter"],
         )
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
@@ -2275,6 +2280,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_ep_weight_filter=self.enable_ep_weight_filter,
+            enable_pp_weight_filter=self.enable_pp_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,

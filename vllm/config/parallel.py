@@ -171,6 +171,11 @@ class ParallelConfig:
     per-expert weight tensors (e.g. DeepSeek, Mixtral, Kimi-K2.5).  Has no
     effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
     models."""
+    enable_pp_weight_filter: bool = False
+    """Skip checkpoint tensors owned by other pipeline-parallel stages before
+    materializing them. This currently supports the default lazy safetensors
+    loader for models whose checkpoint layer prefixes match their vLLM module
+    prefixes."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)

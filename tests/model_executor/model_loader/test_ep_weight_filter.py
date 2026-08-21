@@ -9,6 +9,7 @@ import huggingface_hub.constants
 import pytest
 import torch
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
     parse_expert_id,
@@ -269,6 +270,45 @@ class TestSafetensorsWeightsIteratorWithEpFilter:
         )
         # GPT-2 has no experts, so nothing should be filtered
         assert set(all_weights.keys()) == set(filtered_weights.keys())
+
+
+def test_weight_name_filter_runs_before_tensor_materialization(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"placeholder")
+    materialized = []
+
+    class FakeSafeOpen:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def keys(self):
+            return ["model.layers.0.weight", "model.layers.1.weight"]
+
+        def get_tensor(self, name):
+            materialized.append(name)
+            return torch.ones(1)
+
+    monkeypatch.setattr(
+        weight_utils,
+        "safe_open",
+        lambda *args, **kwargs: FakeSafeOpen(),
+    )
+    monkeypatch.setattr(weight_utils, "_get_fs_type", lambda paths: "ext4")
+    monkeypatch.setattr(weight_utils, "_get_available_ram_bytes", lambda: 1024**3)
+
+    loaded = dict(
+        safetensors_weights_iterator(
+            [str(checkpoint)],
+            False,
+            weight_name_filter=lambda name: name.startswith("model.layers.1."),
+        )
+    )
+
+    assert set(loaded) == {"model.layers.1.weight"}
+    assert materialized == ["model.layers.1.weight"]
 
 
 class TestEpFilterOnSyntheticMoeWeights:

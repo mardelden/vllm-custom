@@ -4,7 +4,7 @@ import dataclasses
 import glob
 import os
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from typing import cast
 
 import torch
@@ -74,6 +74,7 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        self.pp_missing_layer_names: tuple[str, ...] = ()
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -246,6 +247,7 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         extra_config = self.load_config.model_loader_extra_config
+        weight_name_filter = self._get_pp_weight_filter(source.prefix)
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path,
             source.subfolder,
@@ -289,6 +291,7 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        weight_name_filter=weight_name_filter,
                         safetensors_prefetch_num_threads=(
                             self.load_config.safetensors_prefetch_num_threads
                         ),
@@ -317,6 +320,19 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
         return ((source.prefix + name, tensor) for (name, tensor) in weights_iterator)
+
+    def _get_pp_weight_filter(self, source_prefix: str) -> Callable[[str], bool] | None:
+        if not self.pp_missing_layer_names:
+            return None
+
+        def is_local_weight(name: str) -> bool:
+            qualified_name = source_prefix + name
+            return not any(
+                qualified_name.startswith(missing_prefix)
+                for missing_prefix in self.pp_missing_layer_names
+            )
+
+        return is_local_weight
 
     def get_all_weights(
         self,
@@ -411,6 +427,39 @@ class DefaultModelLoader(BaseModelLoader):
                 num_experts,
             )
 
+    def _init_pp_weight_filter(self, model: nn.Module) -> None:
+        """Find module prefixes omitted from this pipeline-parallel stage."""
+        from vllm.config import get_current_vllm_config
+
+        parallel_config = get_current_vllm_config().parallel_config
+        if not (
+            parallel_config.pipeline_parallel_size > 1
+            and parallel_config.enable_pp_weight_filter
+        ):
+            return
+
+        if self.load_config.load_format not in ("auto", "safetensors"):
+            raise ValueError(
+                "enable_pp_weight_filter currently supports only the default "
+                "safetensors loader"
+            )
+        if self.load_config.safetensors_load_strategy not in (None, "lazy"):
+            raise ValueError(
+                "enable_pp_weight_filter requires the lazy safetensors load strategy"
+            )
+        if self.load_config.model_loader_extra_config.get("enable_multithread_load"):
+            raise ValueError(
+                "enable_pp_weight_filter does not support multithread weight loading"
+            )
+
+        from vllm.model_executor.models.utils import get_pp_missing_layer_names
+
+        self.pp_missing_layer_names = tuple(get_pp_missing_layer_names(model))
+        logger.info_once(
+            "PP weight filter: skipping %d non-local module prefixes before read",
+            len(self.pp_missing_layer_names),
+        )
+
     @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
@@ -423,6 +472,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         self._init_ep_weight_filter(model_config)
+        self._init_pp_weight_filter(model)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
