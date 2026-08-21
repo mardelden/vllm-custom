@@ -15,7 +15,8 @@ vllm serve <model> \
     "queue_size": -1,
     "max_threads": 16,
     "bbuf_size_kb": 16384,
-    "max_copy_block_size": 67108864
+    "max_copy_block_size": 67108864,
+    "use_o_direct": "auto"
   }'
 ```
 
@@ -23,3 +24,9 @@ vllm serve <model> \
 residency. The other settings control parallel requests within that residency
 limit. Increase them only after measuring storage throughput and peak host/device
 memory on the target system.
+
+With a compatible FastSafetensors version, `use_o_direct=true` bypasses the OS
+page cache for aligned no-GDS reads. `"auto"` uses buffered reads for a mostly
+resident checkpoint and O_DIRECT for a cold checkpoint. Leave this unset unless
+the filesystem and FastSafetensors build support the option; direct I/O requires
+aligned internal requests and can be slower than buffered warm-cache reads.

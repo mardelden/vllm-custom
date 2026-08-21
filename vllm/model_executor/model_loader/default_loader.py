@@ -94,6 +94,7 @@ class DefaultModelLoader(BaseModelLoader):
                     "max_threads",
                     "bbuf_size_kb",
                     "max_copy_block_size",
+                    "use_o_direct",
                 }
             )
         unexpected_keys = set(extra_config.keys()) - allowed_keys
@@ -136,6 +137,14 @@ class DefaultModelLoader(BaseModelLoader):
                         f"fastsafetensors {key} must be a positive integer, "
                         f"got {value!r}"
                     )
+            use_o_direct = extra_config.get("use_o_direct")
+            if use_o_direct is not None and not (
+                type(use_o_direct) is bool or use_o_direct == "auto"
+            ):
+                raise ValueError(
+                    "fastsafetensors use_o_direct must be a bool or 'auto', "
+                    f"got {use_o_direct!r}"
+                )
 
         self.enable_weights_track: bool | None = extra_config.get(
             "enable_weights_track", None
@@ -301,6 +310,7 @@ class DefaultModelLoader(BaseModelLoader):
                     max_threads=extra_config.get("max_threads"),
                     bbuf_size_kb=extra_config.get("bbuf_size_kb"),
                     max_copy_block_size=extra_config.get("max_copy_block_size"),
+                    use_o_direct=extra_config.get("use_o_direct"),
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(

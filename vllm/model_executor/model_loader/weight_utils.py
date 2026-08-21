@@ -1039,6 +1039,7 @@ def fastsafetensors_weights_iterator(
     max_threads: int | None = None,
     bbuf_size_kb: int | None = None,
     max_copy_block_size: int | None = None,
+    use_o_direct: bool | str | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1060,7 +1061,12 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1 or tensor_filter is not None
+    nogds = (
+        pg.size() > 1
+        or tensor_filter is not None
+        or use_o_direct is True
+        or use_o_direct == "auto"
+    )
 
     if queue_size is None:
         queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
@@ -1082,6 +1088,8 @@ def fastsafetensors_weights_iterator(
         if tensor_filter is not None:
             loader_kwargs["tensor_filter"] = tensor_filter
             loader_kwargs["all_local"] = True
+        if use_o_direct is not None:
+            loader_kwargs["use_o_direct"] = use_o_direct
         loader = ParallelLoader(**loader_kwargs)
         if max_copy_block_size is not None:
             copy_files_to_device = loader.loader.copy_files_to_device

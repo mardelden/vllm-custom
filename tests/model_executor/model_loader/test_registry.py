@@ -69,6 +69,7 @@ def test_default_loader_rejects_multithread_with_non_lazy_strategy():
         ("max_threads", 0),
         ("bbuf_size_kb", 0),
         ("max_copy_block_size", 0),
+        ("use_o_direct", 1),
     ],
 )
 def test_default_loader_rejects_invalid_fastsafetensors_config(key, value):

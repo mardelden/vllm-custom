@@ -19,7 +19,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.platforms import current_platform
 
 
-def test_fastsafetensors_parallel_loader_controls(monkeypatch):
+@pytest.mark.parametrize("use_o_direct", [True, "auto"])
+def test_fastsafetensors_parallel_loader_controls(monkeypatch, use_o_direct):
     captured = {}
     copy_kwargs = {}
 
@@ -60,6 +61,7 @@ def test_fastsafetensors_parallel_loader_controls(monkeypatch):
             max_threads=16,
             bbuf_size_kb=16384,
             max_copy_block_size=64 * 1024**2,
+            use_o_direct=use_o_direct,
         )
     )
     assert captured["queue_size"] == -1
@@ -68,6 +70,7 @@ def test_fastsafetensors_parallel_loader_controls(monkeypatch):
     assert captured["tensor_filter"] is tensor_filter
     assert captured["all_local"] is True
     assert captured["nogds"] is True
+    assert captured["use_o_direct"] == use_o_direct
     assert copy_kwargs["max_copy_block_size"] == 64 * 1024**2
 
 
