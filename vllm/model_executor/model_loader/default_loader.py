@@ -86,6 +86,15 @@ class DefaultModelLoader(BaseModelLoader):
             "num_threads",
             "enable_weights_track",
         }
+        if load_config.load_format == "fastsafetensors":
+            allowed_keys.update(
+                {
+                    "queue_size",
+                    "max_threads",
+                    "bbuf_size_kb",
+                    "max_copy_block_size",
+                }
+            )
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -108,6 +117,24 @@ class DefaultModelLoader(BaseModelLoader):
             raise ValueError(
                 f"num_threads must be a positive integer, got {num_threads!r}"
             )
+
+        if load_config.load_format == "fastsafetensors":
+            queue_size = extra_config.get("queue_size")
+            if queue_size is not None and not (
+                type(queue_size) is int and queue_size >= -1
+            ):
+                raise ValueError(
+                    "fastsafetensors queue_size must be an integer >= -1, "
+                    f"got {queue_size!r}"
+                )
+
+            for key in ("max_threads", "bbuf_size_kb", "max_copy_block_size"):
+                value = extra_config.get(key)
+                if value is not None and not (type(value) is int and value > 0):
+                    raise ValueError(
+                        f"fastsafetensors {key} must be a positive integer, "
+                        f"got {value!r}"
+                    )
 
         self.enable_weights_track: bool | None = extra_config.get(
             "enable_weights_track", None
@@ -268,6 +295,10 @@ class DefaultModelLoader(BaseModelLoader):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    queue_size=extra_config.get("queue_size"),
+                    max_threads=extra_config.get("max_threads"),
+                    bbuf_size_kb=extra_config.get("bbuf_size_kb"),
+                    max_copy_block_size=extra_config.get("max_copy_block_size"),
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(

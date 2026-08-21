@@ -1033,6 +1033,11 @@ def runai_safetensors_weights_iterator(
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    *,
+    queue_size: int | None = None,
+    max_threads: int | None = None,
+    bbuf_size_kb: int | None = None,
+    max_copy_block_size: int | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1056,17 +1061,27 @@ def fastsafetensors_weights_iterator(
     # unwanted CUDA contexts on every device.
     nogds = pg.size() > 1
 
-    queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
+    if queue_size is None:
+        queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
 
     def _make_loader(nogds: bool) -> "ParallelLoader":
+        loader_kwargs: dict[str, Any] = {
+            "pg": pg,
+            "hf_weights_files": hf_weights_files,
+            "queue_size": queue_size,
+            "use_tqdm_on_load": tqdm_enabled,
+            "device": str(device),
+            "nogds": nogds,
+        }
+        if max_threads is not None:
+            loader_kwargs["max_threads"] = max_threads
+        if bbuf_size_kb is not None:
+            loader_kwargs["bbuf_size_kb"] = bbuf_size_kb
+        if max_copy_block_size is not None:
+            loader_kwargs["max_copy_block_size"] = max_copy_block_size
         return ParallelLoader(
-            pg=pg,
-            hf_weights_files=hf_weights_files,
-            queue_size=queue_size,
-            use_tqdm_on_load=tqdm_enabled,
-            device=str(device),
-            nogds=nogds,
+            **loader_kwargs,
         )
 
     # GDS can fail either at construction or lazily inside the producer

@@ -2,18 +2,61 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import glob
+import sys
 import tempfile
+from types import SimpleNamespace
 
 import huggingface_hub.constants
 import pytest
 import torch
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     fastsafetensors_weights_iterator,
     safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+
+
+def test_fastsafetensors_parallel_loader_controls(monkeypatch):
+    captured = {}
+
+    class FakeParallelLoader:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def iterate_weights(self):
+            return iter(())
+
+        def close(self):
+            pass
+
+    monkeypatch.setitem(
+        sys.modules,
+        "fastsafetensors.parallel_loader",
+        SimpleNamespace(ParallelLoader=FakeParallelLoader),
+    )
+    monkeypatch.setattr(
+        weight_utils,
+        "current_platform",
+        SimpleNamespace(current_device=lambda: 0),
+    )
+
+    assert not list(
+        fastsafetensors_weights_iterator(
+            ["model.safetensors"],
+            False,
+            queue_size=-1,
+            max_threads=16,
+            bbuf_size_kb=16384,
+            max_copy_block_size=64 * 1024**2,
+        )
+    )
+    assert captured["queue_size"] == -1
+    assert captured["max_threads"] == 16
+    assert captured["bbuf_size_kb"] == 16384
+    assert captured["max_copy_block_size"] == 64 * 1024**2
 
 
 @pytest.mark.skipif(
