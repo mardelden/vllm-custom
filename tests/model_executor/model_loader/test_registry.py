@@ -61,6 +61,36 @@ def test_default_loader_rejects_multithread_with_non_lazy_strategy():
         )
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("queue_size", -2),
+        ("queue_size", True),
+        ("max_threads", 0),
+        ("bbuf_size_kb", 0),
+        ("max_copy_block_size", 0),
+    ],
+)
+def test_default_loader_rejects_invalid_fastsafetensors_config(key, value):
+    with pytest.raises(ValueError, match=key):
+        DefaultModelLoader(
+            LoadConfig(
+                load_format="fastsafetensors",
+                model_loader_extra_config={key: value},
+            )
+        )
+
+
+def test_default_loader_rejects_fastsafetensors_config_for_other_formats():
+    with pytest.raises(ValueError, match="Unexpected extra config"):
+        DefaultModelLoader(
+            LoadConfig(
+                load_format="safetensors",
+                model_loader_extra_config={"max_threads": 16},
+            )
+        )
+
+
 def test_default_loader_explicit_safetensors_does_not_misread_pt(tmp_path):
     # Explicit safetensors must not fall back to a .pt and open it as safetensors.
     (tmp_path / "model.pt").write_bytes(b"\x00\x00\x00\x00")
