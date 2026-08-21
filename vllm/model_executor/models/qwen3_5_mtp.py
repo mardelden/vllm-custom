@@ -301,6 +301,13 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def fastsafetensors_weight_filter(self, name: str) -> bool:
+        if get_pp_group().world_size == 1:
+            return name.startswith("mtp.")
+        return name.startswith("mtp.") or any(
+            key in name for key in ("embed_tokens", "lm_head")
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def remap_weight_names(weights):
             for name, weight in weights:
@@ -314,7 +321,14 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(remap_weight_names(weights))
+        loaded_weights = loader.load_weights(remap_weight_names(weights))
+        if get_pp_group().world_size == 1:
+            loaded_weights.update(
+                name
+                for name, _ in self.named_parameters()
+                if name.startswith(("model.embed_tokens.", "lm_head."))
+            )
+        return loaded_weights
 
 
 class Qwen3_5MoeMTP(Qwen3_5MTP, QwenNextMixtureOfExperts):

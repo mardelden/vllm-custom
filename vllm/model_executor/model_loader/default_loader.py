@@ -4,7 +4,7 @@ import dataclasses
 import glob
 import os
 import time
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from typing import cast
 
 import torch
@@ -74,6 +74,7 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        self.fastsafetensors_weight_filter: Callable[[str], bool] | None = None
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -295,6 +296,7 @@ class DefaultModelLoader(BaseModelLoader):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    tensor_filter=self.fastsafetensors_weight_filter,
                     queue_size=extra_config.get("queue_size"),
                     max_threads=extra_config.get("max_threads"),
                     bbuf_size_kb=extra_config.get("bbuf_size_kb"),
@@ -454,6 +456,9 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         self._init_ep_weight_filter(model_config)
+        self.fastsafetensors_weight_filter = getattr(
+            model, "fastsafetensors_weight_filter", None
+        )
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 

@@ -467,6 +467,10 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
     supports_multimodal_pruning = True
 
+    @staticmethod
+    def fastsafetensors_weight_filter(name: str) -> bool:
+        return not name.startswith("mtp.")
+
     hf_to_vllm_mapper = (
         Qwen3VLForConditionalGeneration.hf_to_vllm_mapper
         | WeightsMapper(orig_to_new_prefix={"mtp.": None})

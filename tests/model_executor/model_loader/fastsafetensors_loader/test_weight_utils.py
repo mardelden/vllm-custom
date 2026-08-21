@@ -21,12 +21,19 @@ from vllm.platforms import current_platform
 
 def test_fastsafetensors_parallel_loader_controls(monkeypatch):
     captured = {}
+    copy_kwargs = {}
+
+    class FakeFileLoader:
+        def copy_files_to_device(self, **kwargs):
+            copy_kwargs.update(kwargs)
 
     class FakeParallelLoader:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+            self.loader = FakeFileLoader()
 
         def iterate_weights(self):
+            self.loader.copy_files_to_device()
             return iter(())
 
         def close(self):
@@ -43,10 +50,12 @@ def test_fastsafetensors_parallel_loader_controls(monkeypatch):
         SimpleNamespace(current_device=lambda: 0),
     )
 
+    tensor_filter = lambda name: name == "keep"
     assert not list(
         fastsafetensors_weights_iterator(
             ["model.safetensors"],
             False,
+            tensor_filter=tensor_filter,
             queue_size=-1,
             max_threads=16,
             bbuf_size_kb=16384,
@@ -56,7 +65,10 @@ def test_fastsafetensors_parallel_loader_controls(monkeypatch):
     assert captured["queue_size"] == -1
     assert captured["max_threads"] == 16
     assert captured["bbuf_size_kb"] == 16384
-    assert captured["max_copy_block_size"] == 64 * 1024**2
+    assert captured["tensor_filter"] is tensor_filter
+    assert captured["all_local"] is True
+    assert captured["nogds"] is True
+    assert copy_kwargs["max_copy_block_size"] == 64 * 1024**2
 
 
 @pytest.mark.skipif(

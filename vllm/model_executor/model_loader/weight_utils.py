@@ -1034,6 +1034,7 @@ def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     *,
+    tensor_filter: Callable[[str], bool] | None = None,
     queue_size: int | None = None,
     max_threads: int | None = None,
     bbuf_size_kb: int | None = None,
@@ -1059,7 +1060,7 @@ def fastsafetensors_weights_iterator(
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
-    nogds = pg.size() > 1
+    nogds = pg.size() > 1 or tensor_filter is not None
 
     if queue_size is None:
         queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
@@ -1078,11 +1079,19 @@ def fastsafetensors_weights_iterator(
             loader_kwargs["max_threads"] = max_threads
         if bbuf_size_kb is not None:
             loader_kwargs["bbuf_size_kb"] = bbuf_size_kb
+        if tensor_filter is not None:
+            loader_kwargs["tensor_filter"] = tensor_filter
+            loader_kwargs["all_local"] = True
+        loader = ParallelLoader(**loader_kwargs)
         if max_copy_block_size is not None:
-            loader_kwargs["max_copy_block_size"] = max_copy_block_size
-        return ParallelLoader(
-            **loader_kwargs,
-        )
+            copy_files_to_device = loader.loader.copy_files_to_device
+
+            def configured_copy_files_to_device(*args: Any, **kwargs: Any) -> Any:
+                kwargs.setdefault("max_copy_block_size", max_copy_block_size)
+                return copy_files_to_device(*args, **kwargs)
+
+            loader.loader.copy_files_to_device = configured_copy_files_to_device
+        return loader
 
     # GDS can fail either at construction or lazily inside the producer
     # thread during iteration (e.g. cuFileHandleRegister returning

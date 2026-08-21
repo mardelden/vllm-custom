@@ -106,10 +106,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     @override
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
-        # Draft models don't share embeddings with the target model
-        pass
+        if self.speculative_config.method == "mtp":
+            super()._maybe_share_embeddings(target_language_model)
 
     @override
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
-        # Draft models don't share lm_head with the target model
-        pass
+        if self.speculative_config.method == "mtp":
+            super()._maybe_share_lm_head(target_language_model)
