@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 
 
 def compute_plan_fingerprint(
@@ -72,6 +72,17 @@ def compute_plan_fingerprint(
     }
     digest = hashlib.sha256(json.dumps(factors, sort_keys=True).encode()).hexdigest()
     return digest[:16]
+
+
+def _get_worker_plan_fingerprint(worker: "Worker") -> str:
+    """Return the immutable startup-plan fingerprint for this worker boot."""
+    fingerprint = getattr(worker, "_startup_plan_fingerprint", None)
+    if not isinstance(fingerprint, str):
+        fingerprint = compute_plan_fingerprint(
+            worker.vllm_config, worker.rank, worker.parallel_config.world_size
+        )
+        worker._startup_plan_fingerprint = fingerprint
+    return fingerprint
 
 
 def _plan_path(fingerprint: str) -> str:
@@ -140,9 +151,7 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
         or worker.cache_config.kv_cache_memory_bytes is not None
     ):
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config, worker.rank, worker.parallel_config.world_size
-    )
+    fingerprint = _get_worker_plan_fingerprint(worker)
     plan = _load_plan(fingerprint)
     if plan is None:
         return
@@ -170,9 +179,7 @@ def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> Non
     never raised."""
     if not envs.VLLM_ENABLE_STARTUP_PLAN:
         return
-    fingerprint = compute_plan_fingerprint(
-        worker.vllm_config, worker.rank, worker.parallel_config.world_size
-    )
+    fingerprint = _get_worker_plan_fingerprint(worker)
     path = _plan_path(fingerprint)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)

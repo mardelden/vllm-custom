@@ -6550,9 +6550,15 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    def profile_run(self) -> None:
+    def profile_run(self, *, skip_mm_encoder: bool = False) -> None:
+        """Profile the language model and, when needed, its MM encoder."""
         # Profile with multimodal encoder & encoder cache.
-        if self.supports_mm_inputs:
+        if self.supports_mm_inputs and skip_mm_encoder:
+            logger.info(
+                "Skipping multimodal encoder memory profiling because KV "
+                "cache memory is already specified."
+            )
+        elif self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and mm_config.skip_mm_profiling:
                 logger.info(

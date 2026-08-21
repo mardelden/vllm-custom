@@ -795,8 +795,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
-        if self.supports_mm_inputs and self.is_first_pp_rank:
+    def profile_run(self, *, skip_mm_encoder: bool = False) -> None:
+        """Profile the language model and, when needed, its MM encoder."""
+        if self.supports_mm_inputs and skip_mm_encoder:
+            logger.info(
+                "Skipping multimodal encoder memory profiling because KV "
+                "cache memory is already specified."
+            )
+        elif self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
             if mm_config is not None and not mm_config.skip_mm_profiling:
                 mm_budget = MultiModalBudget(

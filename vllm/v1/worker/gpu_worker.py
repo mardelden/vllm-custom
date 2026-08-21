@@ -489,7 +489,7 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(skip_mm_encoder=True)
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -803,7 +803,7 @@ class Worker(WorkerBase):
 
             logger.info(msg)
 
-            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
+            maybe_save_startup_plan(self, int(self.available_kv_cache_memory_bytes))
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.

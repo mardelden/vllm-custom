@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -77,3 +77,39 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_startup_plan_fingerprint_is_stable_during_boot(plan_env):
+    """Runtime config mutation must not separate plan lookup from save."""
+    population = _plan_worker()
+    maybe_apply_startup_plan(population)
+    population.vllm_config.compute_hash = lambda: "mutated-after-lookup"
+    maybe_save_startup_plan(population, 50 * GiB_bytes)
+
+    cached = _plan_worker()
+    maybe_apply_startup_plan(cached)
+    assert cached.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
+
+
+def test_known_kv_memory_skips_only_mm_encoder_profile(monkeypatch):
+    """Known KV capacity still profiles the language model for compilation."""
+    from vllm.v1.worker.gpu_worker import Worker
+
+    profile_run = Mock()
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=50 * GiB_bytes),
+        model_runner=SimpleNamespace(profile_run=profile_run),
+        init_snapshot=SimpleNamespace(free_memory=78 * GiB_bytes),
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(_api_process_count=1),
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_worker.maybe_apply_startup_plan", lambda _: None
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu_worker.reserve_mm_ipc_gpu_memory",
+        lambda memory, *_: memory,
+    )
+
+    assert Worker.determine_available_memory(worker) == 50 * GiB_bytes
+    profile_run.assert_called_once_with(skip_mm_encoder=True)
