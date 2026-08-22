@@ -12,11 +12,17 @@ There is one engine overlay with immutable release contracts:
   importable but not executable. It remains unchanged for provenance and must
   not be deployed or retagged.
 - [`generic-startup/manifest-r2.json`](generic-startup/manifest-r2.json) is the
-  current release 2 deployment candidate. It adds the CUDA compiler path,
-  persistent FlashInfer workspace, required mounts, executable preflight, and
-  fail-closed promotion gates.
-- [`plans/002-generic-startup-release-2-deployment-handover.md`](../plans/002-generic-startup-release-2-deployment-handover.md)
+  healthy immutable release 2 contract and current rollback target. It added
+  the CUDA compiler path, persistent FlashInfer workspace, required mounts,
+  executable preflight, and fail-closed promotion gates.
+- [`generic-startup/manifest-r3.json`](generic-startup/manifest-r3.json) is the
+  release 3 deployment candidate. It retains the release 2 runtime closure and
+  adds the material persisted-cache, overlap, early-forkserver, bounded-profile,
+  and AOT preload stack.
+- [`plans/003-generic-startup-release-3-deployment-handover.md`](../plans/003-generic-startup-release-3-deployment-handover.md)
   is the current deployment handoff. The
+  [`release 2 handoff`](../plans/002-generic-startup-release-2-deployment-handover.md)
+  documents the rollback release, and the
   [`release 1 handoff`](../plans/001-generic-startup-overlay-deployment-handover.md)
   remains historical evidence.
 
