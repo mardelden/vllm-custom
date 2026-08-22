@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
 from abc import ABC, abstractmethod
 
 import torch
@@ -58,10 +59,50 @@ class BaseModelLoader(ABC):
                     prefix=prefix,
                 )
 
+            aot_preload_modules = tuple(
+                module
+                for module in model.modules()
+                if not getattr(module, "do_not_compile", True)
+            )
+
+            def preload_aot() -> None:
+                try:
+                    from vllm.compilation.decorators import preload_aot_compiled_fn
+
+                    loaded = sum(
+                        preload_aot_compiled_fn(module)
+                        for module in aot_preload_modules
+                    )
+                    logger.debug(
+                        "Deserialized %d AOT artifacts while loading weights",
+                        loaded,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Unable to deserialize AOT artifacts while loading weights",
+                        exc_info=True,
+                    )
+
+            aot_preload_thread: threading.Thread | None = None
+            if (
+                envs.VLLM_ENABLE_AOT_LOAD_OVERLAP
+                and envs.VLLM_USE_AOT_COMPILE
+                and aot_preload_modules
+            ):
+                aot_preload_thread = threading.Thread(
+                    target=preload_aot,
+                    name="vllm-aot-deserialize",
+                )
+                aot_preload_thread.start()
+
             log_model_inspection(model)
 
             logger.debug("Loading weights on %s ...", load_device)
-            self.load_weights(model, model_config)
+            try:
+                self.load_weights(model, model_config)
+            finally:
+                if aot_preload_thread is not None:
+                    aot_preload_thread.join()
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.

@@ -113,3 +113,11 @@ def test_known_kv_memory_skips_only_mm_encoder_profile(monkeypatch):
 
     assert Worker.determine_available_memory(worker) == 50 * GiB_bytes
     profile_run.assert_called_once_with(skip_mm_encoder=True)
+
+
+def test_startup_plan_profiles_only_required_graph_size():
+    from vllm.v1.worker.gpu_model_runner import _get_profile_num_tokens
+
+    assert _get_profile_num_tokens(8192, 8, 96, skip_mm_encoder=False) == 8192
+    assert _get_profile_num_tokens(8192, 8, 96, skip_mm_encoder=True) == 96
+    assert _get_profile_num_tokens(64, 128, 96, skip_mm_encoder=True) == 64

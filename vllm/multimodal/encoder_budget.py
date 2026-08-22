@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
+import json
+import os
 from collections.abc import Mapping
+from contextlib import suppress
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -11,6 +16,88 @@ from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 logger = init_logger(__name__)
+
+_MM_MAX_TOKENS_CACHE_SCHEMA = 1
+
+
+def _mm_max_tokens_cache_fingerprint(
+    vllm_config: VllmConfig, mm_counts: Mapping[str, int]
+) -> str:
+    from vllm import __version__ as vllm_version
+
+    factors = {
+        "schema": _MM_MAX_TOKENS_CACHE_SCHEMA,
+        "vllm": vllm_version,
+        "vllm_config": vllm_config.compute_hash(),
+        "mm_counts": dict(mm_counts),
+    }
+    encoded = json.dumps(factors, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _mm_max_tokens_cache_path(fingerprint: str) -> str:
+    return os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        "startup_plan",
+        f"mm_max_tokens_{fingerprint}.json",
+    )
+
+
+def _load_mm_max_tokens_cache(
+    fingerprint: str, mm_counts: Mapping[str, int]
+) -> dict[str, int] | None:
+    path = _mm_max_tokens_cache_path(fingerprint)
+    try:
+        with open(path) as file:
+            payload = json.load(file)
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as error:
+        logger.warning(
+            "Ignoring unreadable multimodal budget cache %s: %s", path, error
+        )
+        return None
+
+    values = payload.get("mm_max_tokens_per_item")
+    if (
+        payload.get("schema") != _MM_MAX_TOKENS_CACHE_SCHEMA
+        or payload.get("fingerprint") != fingerprint
+        or payload.get("mm_counts") != dict(mm_counts)
+        or not isinstance(values, dict)
+        or not all(
+            isinstance(key, str) and type(value) is int and value >= 0
+            for key, value in values.items()
+        )
+    ):
+        return None
+    return values
+
+
+def _save_mm_max_tokens_cache(
+    fingerprint: str,
+    mm_counts: Mapping[str, int],
+    values: Mapping[str, int],
+) -> None:
+    path = _mm_max_tokens_cache_path(fingerprint)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp_path, "w") as file:
+            json.dump(
+                {
+                    "schema": _MM_MAX_TOKENS_CACHE_SCHEMA,
+                    "fingerprint": fingerprint,
+                    "mm_counts": dict(mm_counts),
+                    "mm_max_tokens_per_item": dict(values),
+                },
+                file,
+                sort_keys=True,
+            )
+        os.replace(tmp_path, path)
+    except OSError as error:
+        logger.warning("Failed to save multimodal budget cache %s: %s", path, error)
+        with suppress(OSError):
+            os.unlink(tmp_path)
 
 
 def get_mm_max_toks_per_item(
@@ -91,12 +178,30 @@ class MultiModalBudget:
 
             active_modalities = tower_modalities | embed_only_modalities
 
-            all_mm_max_toks_per_item = get_mm_max_toks_per_item(
-                model_config,
-                mm_registry,
-                processor,
-                mm_counts=dict.fromkeys(active_modalities, 1),
+            mm_counts = dict.fromkeys(active_modalities, 1)
+            fingerprint = _mm_max_tokens_cache_fingerprint(vllm_config, mm_counts)
+            all_mm_max_toks_per_item: Mapping[str, int] | None = (
+                _load_mm_max_tokens_cache(fingerprint, mm_counts)
+                if envs.VLLM_ENABLE_STARTUP_PLAN
+                else None
             )
+            if all_mm_max_toks_per_item is None:
+                all_mm_max_toks_per_item = get_mm_max_toks_per_item(
+                    model_config,
+                    mm_registry,
+                    processor,
+                    mm_counts=mm_counts,
+                )
+                if envs.VLLM_ENABLE_STARTUP_PLAN:
+                    _save_mm_max_tokens_cache(
+                        fingerprint, mm_counts, all_mm_max_toks_per_item
+                    )
+            else:
+                logger.info(
+                    "Applied multimodal max-token cache (fingerprint %s): %s",
+                    fingerprint,
+                    all_mm_max_toks_per_item,
+                )
 
         if embed_only_modalities:
             logger.info_once(

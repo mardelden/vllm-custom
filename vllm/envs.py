@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "forkserver", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     VLLM_USE_AOT_COMPILE: bool = False
+    VLLM_ENABLE_AOT_LOAD_OVERLAP: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
@@ -780,6 +781,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # compilation is done in warmup phase and the compilation will be
     # reused in subsequent calls.
     "VLLM_USE_AOT_COMPILE": use_aot_compile,
+    "VLLM_ENABLE_AOT_LOAD_OVERLAP": lambda: bool(
+        int(os.environ.get("VLLM_ENABLE_AOT_LOAD_OVERLAP", "0"))
+    ),
     # Feature flag to enable/disable bytecode in
     # TorchCompileWithNoGuardsWrapper.
     "VLLM_USE_BYTECODE_HOOK": lambda: bool(
@@ -937,7 +941,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "fork",
+        ["spawn", "fork", "forkserver"],
     ),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(

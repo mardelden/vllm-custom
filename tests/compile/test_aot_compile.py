@@ -7,6 +7,7 @@ import pickle
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -84,6 +85,65 @@ def make_vllm_config() -> VllmConfig:
             backend="inductor",
         )
     )
+
+
+def test_aot_preload_alias_deserializes_before_first_model_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    import vllm.compilation.decorators as decorators
+
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    disable_envs_cache()
+
+    compilation_config = SimpleNamespace(local_cache_dir=None)
+    vllm_config = SimpleNamespace(
+        compute_hash=lambda: "config-hash",
+        parallel_config=SimpleNamespace(rank=0, data_parallel_index=0),
+    )
+    model = SimpleNamespace(
+        vllm_config=vllm_config,
+        compilation_config=compilation_config,
+        forward=reference_fn,
+        do_not_compile=False,
+        aot_compiled_fn=None,
+    )
+
+    hash_key = "a" * 64
+    alias_file = Path(decorators._aot_preload_alias_file(model))
+    alias_file.parent.mkdir(parents=True)
+    alias_file.write_text(hash_key)
+    _, artifact_path = decorators._aot_compilation_path(model, hash_key)
+    artifact = Path(artifact_path)
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"artifact")
+
+    loaded_fn = object()
+    monkeypatch.setattr(
+        decorators,
+        "_deserialize_aot_compiled_fn",
+        lambda *args, **kwargs: loaded_fn,
+    )
+    assert decorators.preload_aot_compiled_fn(model)
+    assert model._preloaded_aot_compiled_fn is loaded_fn
+
+    monkeypatch.setattr(
+        decorators,
+        "_finalize_aot_compiled_fn",
+        lambda _model, loaded, *args, **kwargs: loaded,
+    )
+    used_preloaded, taken_fn = decorators._take_preloaded_aot_compiled_fn(
+        model, f"{artifact_path}.stale"
+    )
+    assert not used_preloaded
+    assert taken_fn is None
+
+    assert decorators.preload_aot_compiled_fn(model)
+    used_preloaded, taken_fn = decorators._take_preloaded_aot_compiled_fn(
+        model, artifact_path
+    )
+    assert used_preloaded
+    assert taken_fn is loaded_fn
 
 
 @contextmanager

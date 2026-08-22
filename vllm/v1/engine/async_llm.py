@@ -6,6 +6,7 @@ import socket
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import copy
 from typing import Any
 
@@ -132,29 +133,47 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.renderer = renderer = renderer_from_config(self.vllm_config)
+        def initialize_frontend() -> None:
+            self.renderer = renderer = renderer_from_config(self.vllm_config)
 
-        # Convert EngineInput --> EngineCoreRequest.
-        self.input_processor = InputProcessor(self.vllm_config, renderer)
+            # Convert EngineInput --> EngineCoreRequest.
+            self.input_processor = InputProcessor(self.vllm_config, renderer)
 
-        # Converts EngineCoreOutputs --> RequestOutput.
-        self.output_processor = OutputProcessor(
-            renderer.tokenizer,
-            log_stats=self.log_stats,
-            stream_interval=self.vllm_config.scheduler_config.stream_interval,
-            tracing_enabled=tracing_endpoint is not None,
-        )
+            # Converts EngineCoreOutputs --> RequestOutput.
+            self.output_processor = OutputProcessor(
+                renderer.tokenizer,
+                log_stats=self.log_stats,
+                stream_interval=self.vllm_config.scheduler_config.stream_interval,
+                tracing_enabled=tracing_endpoint is not None,
+            )
+            renderer.start_mm_warmup()
 
-        # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient.make_async_mp_client(
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            log_stats=self.log_stats,
-            client_addresses=client_addresses,
-            client_count=client_count,
-            client_index=client_index,
-            post_engine_launch_callback=renderer.start_mm_warmup,
-        )
+        frontend_future: Future[None] | None = None
+        with ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="vllm-frontend-init"
+        ) as frontend_executor:
+
+            def start_frontend_initialization() -> None:
+                nonlocal frontend_future
+                frontend_future = frontend_executor.submit(initialize_frontend)
+
+            # EngineCore starts first so frontend initialization overlaps its
+            # process launch, imports, model construction, and weight loading.
+            self.engine_core = EngineCoreClient.make_async_mp_client(
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=self.log_stats,
+                client_addresses=client_addresses,
+                client_count=client_count,
+                client_index=client_index,
+                post_engine_launch_callback=start_frontend_initialization,
+            )
+            assert frontend_future is not None
+            try:
+                frontend_future.result()
+            except BaseException:
+                self.engine_core.shutdown()
+                raise
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None

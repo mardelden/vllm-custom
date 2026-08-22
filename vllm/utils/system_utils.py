@@ -127,7 +127,8 @@ def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
     """
-    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+    mp_method = os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+    if mp_method == "spawn":
         return
 
     reasons = []
@@ -145,10 +146,11 @@ def _maybe_force_spawn():
     if "--numa-bind" in sys.argv:
         reasons.append("NUMA binding requires spawn method")
 
-    if cuda_is_initialized():
-        reasons.append("CUDA is initialized")
-    elif xpu_is_initialized():
-        reasons.append("XPU is initialized")
+    if mp_method != "forkserver":
+        if cuda_is_initialized():
+            reasons.append("CUDA is initialized")
+        elif xpu_is_initialized():
+            reasons.append("XPU is initialized")
 
     if in_wsl():
         reasons.append("WSL is detected and NVML is not compatible with fork")
@@ -166,7 +168,7 @@ def _maybe_force_spawn():
 
 
 def get_mp_context():
-    """Get a multiprocessing context with a particular method (spawn or fork).
+    """Get a multiprocessing context with the configured start method.
     By default we follow the value of the VLLM_WORKER_MULTIPROC_METHOD to
     determine the multiprocessing method (default is fork). However, under
     certain conditions, we may enforce spawn and override the value of

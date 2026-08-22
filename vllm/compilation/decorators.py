@@ -290,42 +290,190 @@ def _try_load_aot_compiled_fn(
     Returns the loaded callable on success, or None on failure.
     Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
     """
-    try:
-        with monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder):
-            with (
-                set_current_vllm_config(model.vllm_config),
-                open(aot_compilation_path, "rb") as f,
-            ):
-                loaded_fn = torch.compiler.load_compiled_function(
-                    f, f_globals=model.forward.__globals__
-                )
-            _verify_source_unchanged(loaded_fn.source_info(), model.vllm_config)
-            ds_config = model.compilation_config.dynamic_shapes_config
-            if not ds_config.evaluate_guards:
-                loaded_fn.disable_guard_check()
-            # Eagerly load compiled artifacts now that traced_files
-            # is populated by _verify_source_unchanged.
-            with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
-                loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
-            compilation_counter.num_aot_artifacts_loaded += 1
-            logger.info(
-                "Directly load AOT compilation from path %s", aot_compilation_path
-            )
-        return loaded_fn
-    except Exception as e:
-        if os.path.exists(aot_compilation_path):
-            if isinstance(e, EOFError):
-                message = "Compile cache file corrupted."
-            else:
-                message = str(e)
-            logger.warning(
-                "Compiling model again due to a load failure from %s, reason: %s",
-                aot_compilation_path,
-                message,
-            )
-        if envs.VLLM_FORCE_AOT_LOAD:
-            raise e
+    loaded_fn = _deserialize_aot_compiled_fn(
+        model,
+        aot_compilation_path,
+        force=envs.VLLM_FORCE_AOT_LOAD,
+    )
+    if loaded_fn is None:
         return None
+    return _finalize_aot_compiled_fn(
+        model,
+        loaded_fn,
+        aot_compilation_path,
+        force=envs.VLLM_FORCE_AOT_LOAD,
+    )
+
+
+def _log_aot_load_failure(aot_compilation_path: str, error: Exception) -> None:
+    if not os.path.exists(aot_compilation_path):
+        return
+    message = (
+        "Compile cache file corrupted." if isinstance(error, EOFError) else str(error)
+    )
+    logger.warning(
+        "Compiling model again due to a load failure from %s, reason: %s",
+        aot_compilation_path,
+        message,
+    )
+
+
+def _deserialize_aot_compiled_fn(
+    model: Any,
+    aot_compilation_path: str,
+    *,
+    force: bool,
+) -> Any | None:
+    try:
+        with (
+            monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder),
+            set_current_vllm_config(model.vllm_config),
+            open(aot_compilation_path, "rb") as file,
+        ):
+            return torch.compiler.load_compiled_function(
+                file, f_globals=model.forward.__globals__
+            )
+    except Exception as error:
+        _log_aot_load_failure(aot_compilation_path, error)
+        if force:
+            raise
+        return None
+
+
+def _finalize_aot_compiled_fn(
+    model: Any,
+    loaded_fn: Any,
+    aot_compilation_path: str,
+    *,
+    force: bool,
+) -> Any | None:
+    try:
+        _verify_source_unchanged(loaded_fn.source_info(), model.vllm_config)
+        ds_config = model.compilation_config.dynamic_shapes_config
+        if not ds_config.evaluate_guards:
+            loaded_fn.disable_guard_check()
+        with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
+            loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
+        compilation_counter.num_aot_artifacts_loaded += 1
+        logger.info("Directly load AOT compilation from path %s", aot_compilation_path)
+        return loaded_fn
+    except Exception as error:
+        _log_aot_load_failure(aot_compilation_path, error)
+        if force:
+            raise
+        return None
+
+
+def _aot_preload_alias_file(model: Any) -> str:
+    factors = [
+        model.vllm_config.compute_hash(),
+        _model_hash_key(model.forward),
+        torch.__version__,
+    ]
+    alias_key = hashlib.sha256(str(factors).encode()).hexdigest()
+    parallel_config = model.vllm_config.parallel_config
+    return os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        "torch_compile_cache",
+        "torch_aot_preload_alias",
+        alias_key,
+        f"rank_{parallel_config.rank}_{parallel_config.data_parallel_index}",
+    )
+
+
+def _aot_compilation_path(model: Any, hash_key: str) -> tuple[str, str]:
+    cache_root = os.path.join(
+        envs.VLLM_CACHE_ROOT,
+        "torch_compile_cache",
+        "torch_aot_compile",
+        hash_key,
+    )
+    parallel_config = model.vllm_config.parallel_config
+    rank_cache = os.path.join(
+        cache_root,
+        f"rank_{parallel_config.rank}_{parallel_config.data_parallel_index}",
+    )
+    return cache_root, os.path.join(rank_cache, "model")
+
+
+def _configure_aot_cache(model: Any, cache_root: str) -> None:
+    model.compilation_config.local_cache_dir = cache_root
+    inductor_cache = os.path.join(cache_root, "inductor_cache")
+    os.makedirs(inductor_cache, exist_ok=True)
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+
+
+def preload_aot_compiled_fn(model: Any) -> bool:
+    """Deserialize an AOT artifact selected by its persisted alias."""
+    if (
+        not envs.VLLM_USE_AOT_COMPILE
+        or envs.VLLM_DISABLE_COMPILE_CACHE
+        or getattr(model, "do_not_compile", True)
+        or getattr(model, "aot_compiled_fn", None) is not None
+    ):
+        return False
+
+    alias_file = _aot_preload_alias_file(model)
+    model._aot_preload_alias_file = alias_file
+    try:
+        with open(alias_file) as file:
+            hash_key = file.read().strip()
+    except OSError:
+        return False
+    if len(hash_key) != 64 or any(char not in "0123456789abcdef" for char in hash_key):
+        return False
+
+    cache_root, aot_path = _aot_compilation_path(model, hash_key)
+    if not os.path.isfile(aot_path):
+        return False
+
+    _configure_aot_cache(model, cache_root)
+    loaded_fn = _deserialize_aot_compiled_fn(model, aot_path, force=False)
+    if loaded_fn is None:
+        return False
+
+    model._preloaded_aot_compiled_fn = loaded_fn
+    model._preloaded_aot_compilation_path = os.path.realpath(aot_path)
+    return True
+
+
+def _take_preloaded_aot_compiled_fn(
+    model: Any, aot_compilation_path: str
+) -> tuple[bool, Any | None]:
+    loaded_fn = getattr(model, "_preloaded_aot_compiled_fn", None)
+    loaded_path = getattr(model, "_preloaded_aot_compilation_path", None)
+    model._preloaded_aot_compiled_fn = None
+    model._preloaded_aot_compilation_path = None
+    if loaded_fn is None or loaded_path != os.path.realpath(aot_compilation_path):
+        return False, None
+    logger.info(
+        "Using AOT artifact deserialized during weight loading: %s",
+        aot_compilation_path,
+    )
+    return (
+        True,
+        _finalize_aot_compiled_fn(
+            model,
+            loaded_fn,
+            aot_compilation_path,
+            force=envs.VLLM_FORCE_AOT_LOAD,
+        ),
+    )
+
+
+def _write_aot_preload_alias(model: Any, hash_key: str) -> None:
+    alias_file = getattr(model, "_aot_preload_alias_file", None)
+    if alias_file is None:
+        return
+    os.makedirs(os.path.dirname(alias_file), exist_ok=True)
+    tmp_file = f"{alias_file}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_file, "w") as file:
+            file.write(hash_key)
+        os.replace(tmp_file, alias_file)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_file)
 
 
 def _support_torch_compile(
@@ -540,32 +688,20 @@ def _support_torch_compile(
 
             factors.append(_model_hash_key(self.forward))
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
-            cache_dir = os.path.join(
-                envs.VLLM_CACHE_ROOT,
-                "torch_compile_cache",
-                "torch_aot_compile",
-                hash_key,
-            )
-
-            # Hash-level dir; shared across ranks on the same node.
-            self.compilation_config.local_cache_dir = cache_dir
-            inductor_cache = os.path.join(cache_dir, "inductor_cache")
-            os.makedirs(inductor_cache, exist_ok=True)
-            # Process-wide: post-load execution, CUDA-graph capture, and later
-            # autotune/recompile all need to write under {hash}/inductor_cache/.
-            # Unconditional because torch's cache_dir() may have pre-filled the
-            # /tmp default during import, making setdefault a no-op.
-            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
-
-            rank = self.vllm_config.parallel_config.rank
-            dp_rank = self.vllm_config.parallel_config.data_parallel_index
-            cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
-            aot_compilation_path = os.path.join(cache_dir, "model")
+            self._aot_hash_key = hash_key
+            cache_root, aot_compilation_path = _aot_compilation_path(self, hash_key)
+            _configure_aot_cache(self, cache_root)
+            cache_dir = os.path.dirname(aot_compilation_path)
             if not envs.VLLM_DISABLE_COMPILE_CACHE:
-                loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
+                used_preloaded, loaded_fn = _take_preloaded_aot_compiled_fn(
+                    self, aot_compilation_path
+                )
+                if not used_preloaded:
+                    loaded_fn = _try_load_aot_compiled_fn(self, aot_compilation_path)
                 if loaded_fn is not None:
                     self.aot_compiled_fn = loaded_fn
                     self.was_aot_compile_fn_loaded_from_disk = True
+                    _write_aot_preload_alias(self, hash_key)
                     with (
                         monitor_profiling_run(),
                         maybe_use_cudagraph_partition_wrapper(self.vllm_config),
@@ -704,6 +840,7 @@ def _support_torch_compile(
             tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
             self.aot_compiled_fn.save_compiled_function(tmp_file)
             os.replace(tmp_file, self._aot_compilation_path)
+            _write_aot_preload_alias(self, self._aot_hash_key)
             compilation_counter.num_aot_artifacts_saved += 1
             logger.info_once(
                 "saved AOT compiled function to %s",

@@ -257,6 +257,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_profile_num_tokens(
+    max_num_tokens: int,
+    max_num_reqs: int,
+    max_cudagraph_capture_size: int | None,
+    *,
+    skip_mm_encoder: bool,
+) -> int:
+    if not skip_mm_encoder:
+        return max_num_tokens
+    return min(
+        max_num_tokens,
+        max(max_num_reqs, max_cudagraph_capture_size or 1),
+    )
+
+
 def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
     """Resolve checkpoint names without changing the model's module tree."""
     module_name, _, parameter_name = name.rpartition(".")
@@ -6615,9 +6630,21 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
-        # Add `is_profile` here to pre-allocate communication buffers
+        # Add `is_profile` here to pre-allocate communication buffers.
+        profile_num_tokens = _get_profile_num_tokens(
+            self.max_num_tokens,
+            self.max_num_reqs,
+            self.compilation_config.max_cudagraph_capture_size,
+            skip_mm_encoder=skip_mm_encoder,
+        )
+        if profile_num_tokens != self.max_num_tokens:
+            logger.info(
+                "Startup plan cache hit: profiling with %d tokens instead of %d",
+                profile_num_tokens,
+                self.max_num_tokens,
+            )
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            profile_num_tokens, is_profile=True
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

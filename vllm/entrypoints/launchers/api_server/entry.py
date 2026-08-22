@@ -32,6 +32,13 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger("vllm.entrypoints.launchers.api_server.entry")
 
 
+def _setup_forkserver() -> None:
+    if multiprocessing.get_start_method(allow_none=True) != "forkserver":
+        multiprocessing.set_start_method("forkserver")
+    multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+    forkserver.ensure_running()
+
+
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -43,9 +50,7 @@ async def build_async_engine_client(
         # The executor is expected to be mp.
         # Pre-import heavy modules in the forkserver process
         logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
-        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
-        forkserver.ensure_running()
+        _setup_forkserver()
         logger.debug("Forkserver setup complete!")
 
     # Context manager to handle engine_client lifecycle
