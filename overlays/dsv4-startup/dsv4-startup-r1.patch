@@ -1,0 +1,185 @@
+--- a/vllm/model_executor/model_loader/weight_utils.py
++++ b/vllm/model_executor/model_loader/weight_utils.py
+@@ -1059,6 +1059,7 @@
+     use_tqdm_on_load: bool,
+     local_expert_ids: set[int] | None = None,
+     weight_name_filter: Callable[[str], bool] | None = None,
++    keep_name_filter: Callable[[str], bool] | None = None,
+ ) -> Generator[tuple[str, torch.Tensor], None, None]:
+     """Iterate over the weights in the model safetensor files
+     using fastsafetensor library.
+@@ -1080,20 +1081,88 @@
+     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
+     # initializes the GDS DMA subsystem for all visible GPUs, creating
+     # unwanted CUDA contexts on every device.
+-    nogds = pg.size() > 1
++    # A byte-range filter only skips reads on the nogds/unified copiers, and
++    # requires a single-process loader group (all_local) so that get_tensor
++    # never broadcasts a tensor this rank deliberately did not read.
++    nogds = pg.size() > 1 or keep_name_filter is not None
+ 
+     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
+     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
+ 
++    # FastSafetensors submits one read request per `max_copy_block_size` chunk
++    # and dispatches them over a fixed `max_threads` pool. Its 16 GiB default
++    # exceeds any shard, so every file becomes a single request served by a
++    # single thread while the rest of the pool idles. Sizing the block below
++    # the shard size restores the intended parallelism at no extra memory: the
++    # pinned bounce buffer is already allocated as bbuf_size_kb * max_threads.
++    copy_block_mb = int(os.environ.get("VLLM_FSST_COPY_BLOCK_MB", "0"))
++    fsst_threads = int(os.environ.get("VLLM_FSST_MAX_THREADS", "0"))
++    fsst_bbuf_kb = int(os.environ.get("VLLM_FSST_BBUF_SIZE_KB", "0"))
++    # "" -> leave to the library, "auto" -> per-file residency sampling,
++    # "0"/"1" -> force buffered / aligned O_DIRECT.
++    # Sub-file chunking: bounds the device bytes resident per batch so a
++    # pipelined queue costs chunk-sized, not shard-sized, transient residency.
++    fsst_batch_mb = int(os.environ.get("VLLM_FSST_MAX_BATCH_MB", "0"))
++    # Each rank reads every file and skips the cross-rank broadcast. Trades 2x
++    # read volume (at TP=2) for zero interconnect traffic during load.
++    fsst_all_local = os.environ.get("VLLM_FSST_ALL_LOCAL", "") in ("1", "true")
++    fsst_odirect_raw = os.environ.get("VLLM_FSST_O_DIRECT", "").strip().lower()
++    fsst_odirect: bool | str | None = None
++    if fsst_odirect_raw == "auto":
++        fsst_odirect = "auto"
++    elif fsst_odirect_raw in ("0", "false"):
++        fsst_odirect = False
++    elif fsst_odirect_raw in ("1", "true"):
++        fsst_odirect = True
++
+     def _make_loader(nogds: bool) -> "ParallelLoader":
+-        return ParallelLoader(
++        loader_kwargs: dict[str, Any] = {}
++        if keep_name_filter is not None:
++            loader_kwargs["tensor_filter"] = keep_name_filter
++            loader_kwargs["all_local"] = True
++        elif fsst_all_local:
++            loader_kwargs["all_local"] = True
++        if fsst_threads > 0:
++            loader_kwargs["max_threads"] = fsst_threads
++        if fsst_bbuf_kb > 0:
++            loader_kwargs["bbuf_size_kb"] = fsst_bbuf_kb
++        if fsst_odirect is not None:
++            loader_kwargs["use_o_direct"] = fsst_odirect
++        if fsst_batch_mb > 0:
++            loader_kwargs["max_batch_bytes"] = fsst_batch_mb << 20
++        loader = ParallelLoader(
+             pg=pg,
+             hf_weights_files=hf_weights_files,
+             queue_size=queue_size,
+             use_tqdm_on_load=tqdm_enabled,
+             device=str(device),
+             nogds=nogds,
++            **loader_kwargs,
++        )
++        logger.info_once(
++            "FastSafetensors: queue=%d batch_mb=%s o_direct=%s all_local=%s",
++            queue_size,
++            fsst_batch_mb or "off(whole-shard)",
++            fsst_odirect if fsst_odirect is not None else "library-default",
++            fsst_all_local,
+         )
++        if copy_block_mb > 0:
++            inner = loader.loader.copy_files_to_device
++
++            def _sized_copy_files_to_device(*args: Any, **kwargs: Any) -> Any:
++                kwargs.setdefault("max_copy_block_size", copy_block_mb << 20)
++                return inner(*args, **kwargs)
++
++            loader.loader.copy_files_to_device = _sized_copy_files_to_device
++            logger.info_once(
++                "FastSafetensors geometry: copy_block=%d MiB threads=%s "
++                "bbuf_kb=%s o_direct=%s",
++                copy_block_mb,
++                fsst_threads or "default(16)",
++                fsst_bbuf_kb or "default(16384)",
++                fsst_odirect if fsst_odirect is not None else "library-default",
++            )
++        return loader
+ 
+     # GDS can fail either at construction or lazily inside the producer
+     # thread during iteration (e.g. cuFileHandleRegister returning
+--- a/vllm/model_executor/model_loader/default_loader.py
++++ b/vllm/model_executor/model_loader/default_loader.py
+@@ -11,6 +11,7 @@
+ from torch import nn
+ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
+ 
++from vllm import envs
+ from vllm.config import ModelConfig
+ from vllm.config.load import LoadConfig
+ from vllm.logger import init_logger
+@@ -245,6 +246,7 @@
+         self,
+         source: "Source",
+         weight_name_filter: Callable[[str], bool] | None = None,
++        keep_name_filter: Callable[[str], bool] | None = None,
+     ) -> Generator[tuple[str, torch.Tensor], None, None]:
+         """Get an iterator for the model weights based on the load format."""
+         extra_config = self.load_config.model_loader_extra_config
+@@ -272,6 +274,7 @@
+                     self.load_config.use_tqdm_on_load,
+                     local_expert_ids=self.local_expert_ids,
+                     weight_name_filter=weight_name_filter,
++                    keep_name_filter=keep_name_filter,
+                 )
+             elif self.load_config.load_format == "instanttensor":
+                 weights_iterator = instanttensor_weights_iterator(
+@@ -331,6 +334,17 @@
+         weight_name_filter = getattr(model, "skip_weight_name_before_load", None)
+         if not callable(weight_name_filter):
+             weight_name_filter = None
++        keep_name_filter = getattr(model, "fastsafetensors_keep_weight_name", None)
++        if not callable(keep_name_filter) or not envs.env_bool(
++            "VLLM_DSPARK_DRAFT_RANGE_FILTER", False
++        ):
++            keep_name_filter = None
++        else:
++            logger.info(
++                "Byte-range filter active for %s: skipping unowned "
++                "checkpoint ranges before read.",
++                type(model).__name__,
++            )
+         primary_weights = DefaultModelLoader.Source(
+             model_config.model,
+             model_config.revision,
+@@ -338,14 +352,18 @@
+             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
+             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
+         )
+-        yield from self._get_weights_iterator(primary_weights, weight_name_filter)
++        yield from self._get_weights_iterator(
++            primary_weights, weight_name_filter, keep_name_filter
++        )
+ 
+         secondary_weights = cast(
+             Iterable[DefaultModelLoader.Source],
+             getattr(model, "secondary_weights", ()),
+         )
+         for source in secondary_weights:
+-            yield from self._get_weights_iterator(source, weight_name_filter)
++            yield from self._get_weights_iterator(
++                source, weight_name_filter, keep_name_filter
++            )
+ 
+     def download_model(self, model_config: ModelConfig) -> None:
+         self._prepare_weights(
+--- a/vllm/models/deepseek_v4/nvidia/dspark.py
++++ b/vllm/models/deepseek_v4/nvidia/dspark.py
+@@ -990,6 +990,16 @@
+             return markov_bias
+         return base_logits + markov_bias
+ 
++    def fastsafetensors_keep_weight_name(self, name: str) -> bool:
++        """Checkpoint ranges this draft owns.
++
++        map_name consumes only mtp.* plus the shared embedding/head, so
++        the layers.* target ranges (92.6% of the checkpoint) are never
++        materialized. Unrecognized names are kept so an unknown naming
++        convention fails open rather than silently dropping a weight.
++        """
++        return not name.startswith("layers.")
++
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+         stacked_params_mapping = [
+             ("gate_up_proj", "w1", 0),

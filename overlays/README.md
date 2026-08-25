@@ -5,6 +5,14 @@ fleet repository. The fork owns source changes, compatibility facts, and
 validation evidence. The deployment repository owns image construction,
 service configuration, secrets, rollout, and rollback.
 
+There are two independent overlay lines. They target different vLLM source
+trees and their contracts must never be mixed:
+
+- `generic-startup/` targets stock vLLM 0.27.1 via `mardelden/vllm-custom`.
+- `dsv4-startup/` targets `jasl/vllm` (PR#41834, sm12x) for DeepSeek-V4-Flash.
+
+## generic-startup
+
 There is one engine overlay with immutable release contracts:
 
 - [`generic-startup/manifest.json`](generic-startup/manifest.json) is release 1.
@@ -37,3 +45,17 @@ Starlette, and Prometheus-instrumentator pins remain owned by the shared vLLM
 deployment role. The shim proves Python import compatibility only; each release
 that selects a native backend must also define and pass its executable runtime
 gate.
+
+## dsv4-startup
+
+[`dsv4-startup/dsv4-startup-r1.patch`](dsv4-startup/dsv4-startup-r1.patch) is a
+release-1 candidate against `jasl/vllm@aa0d5130`, paired with
+`mardelden/fastsafetensors@b43888d`. It reduces DeepSeek-V4-Flash model loading
+from 171.37 s to 48.02 s and process-to-API-ready from 152.21 s to 84.11 s.
+
+[`plans/004-deepseek-v4-startup-deployment-handover.md`](../plans/004-deepseek-v4-startup-deployment-handover.md)
+is the deployment handoff. It classifies the patch set into a generic
+FastSafetensors parallelism fix and adaptive direct-I/O upgrade that apply to
+every model, and a DeepSeek-specific draft byte-range filter that must stay
+gated to DeepSeek-V4 profiles. Every component defaults to off, so a deployment
+that sets no environment variables behaves exactly as it does today.
