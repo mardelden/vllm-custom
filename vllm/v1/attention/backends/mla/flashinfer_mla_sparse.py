@@ -53,7 +53,9 @@ class _FlashInferMLASparseBackendBase(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [576]
+        # 576 = 512 NoPE + 64 RoPE; 512 = NoPE-only (qk_rope_head_dim == 0,
+        # e.g. GLM-5.3-Flash). Both share D_V = 512.
+        return [512, 576]
 
     @classmethod
     def is_mla(cls) -> bool:

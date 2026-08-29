@@ -1,0 +1,66 @@
+--- pristine_sm120.py	2026-08-29 01:49:27
++++ overlay/flashinfer_mla_sparse_sm120.py	2026-08-29 01:55:59
+@@ -73,6 +73,12 @@
+         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
+         self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
+         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
++        # NoPE sparse MLA (GLM-5.3-Flash: qk_rope_head_dim == 0) reuses the
++        # packed 656-byte layout by zero-filling the RoPE section: zero rope
++        # dims add nothing to q.k scores, so the math is unchanged. Validated
++        # against a bf16 reference (rel err ~2.7%, pure fp8 quantization).
++        self._nope_pad_rope = self.qk_rope_head_dim == 0
++        self._kernel_rope_dim = 64 if self._nope_pad_rope else self.qk_rope_head_dim
+         from vllm.config import get_current_vllm_config
+ 
+         vllm_config = get_current_vllm_config()
+@@ -102,6 +108,23 @@
+         self.supports_quant_query_input = False
+         self._workspace_buffer: torch.Tensor | None = None
+ 
++    def do_kv_cache_update(
++        self,
++        kv_c_normed: torch.Tensor,
++        k_pe: torch.Tensor,
++        kv_cache: torch.Tensor,
++        slot_mapping: torch.Tensor,
++        kv_cache_dtype: str,
++        k_scale: torch.Tensor,
++    ) -> None:
++        if self._nope_pad_rope and k_pe.shape[-1] == 0:
++            # concat_and_cache_mla asserts pe_dim == 64 for fp8_ds_mla; feed
++            # it zeros so the packed RoPE section stays inert.
++            k_pe = k_pe.new_zeros(*k_pe.shape[:-1], 64)
++        super().do_kv_cache_update(
++            kv_c_normed, k_pe, kv_cache, slot_mapping, kv_cache_dtype, k_scale
++        )
++
+     def forward_mqa(
+         self,
+         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+@@ -111,11 +134,17 @@
+     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+         if isinstance(q, tuple):
+             q = torch.cat(q, dim=-1)
++        if self._nope_pad_rope:
++            q = torch.nn.functional.pad(q, (0, 64))
+ 
+         num_actual_toks = q.shape[0]
+ 
+         assert self.topk_indices_buffer is not None
+         topk_indices = self.topk_indices_buffer[:num_actual_toks]
++        if topk_indices.shape[1] > attn_metadata.topk_tokens:
++            # GLM's indexer pads its shared buffer wider than index_topk; the
++            # sm120 kernel requires exactly sparse_mla_top_k columns.
++            topk_indices = topk_indices[:, : attn_metadata.topk_tokens]
+ 
+         topk_indices_physical = cast(
+             torch.Tensor,
+@@ -146,7 +175,7 @@
+             workspace_buffer=self._workspace_buffer,
+             qk_nope_head_dim=self.qk_nope_head_dim,
+             kv_lora_rank=self.kv_lora_rank,
+-            qk_rope_head_dim=self.qk_rope_head_dim,
++            qk_rope_head_dim=self._kernel_rope_dim,
+             block_tables=topk_indices_physical.unsqueeze(1),
+             seq_lens=None,
+             max_seq_len=attn_metadata.topk_tokens,
