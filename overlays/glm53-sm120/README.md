@@ -33,11 +33,23 @@ quantization), cosine 0.9996, across T = 1..64 and H = 32/64.
 - `probe_nope_zero_padding.py` — correctness probe; runs standalone in the
   image, no server needed.
 
+## Context scaling (measured 2026-08-29)
+
+Per-token KV cost falls with model length as block rounding and KDA state
+amortize: ~21 KB/token at 16k, ~11 KB at 64k, ~9.5 KB at 128k. The profiler's
+CUDA-graph estimate over-charges ~0.6 GiB against a ~0.3 GiB real capture
+(`VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`), and its activation peak is
+conservative: pinning KV directly with `--kv-cache-memory-bytes 1525000000`
+reaches **131,072 max-model-len** (pool 160,496 tokens, 1.22x) with a measured
+2.3 GiB physical margin under a full 114k-token prefill. Needle retrieval is
+exact at 113,986 tokens, depths 25/50/90%. Serve scripts:
+`vllm-code:/opt/glm53-exp/serve-glm53-{64k,128k}.sh`.
+
 ## Known limits
 
-- Memory: fits at `--gpu-memory-utilization 0.98 --max-num-batched-tokens 1024`
-  with 0.52 GiB KV headroom (25,746 tokens, 1.57x concurrency at 16k).
-  At 0.97/2048 profiling ends 0.52 GiB short.
+- Memory at default profiling: fits 16k at `--gpu-memory-utilization 0.98
+  --max-num-batched-tokens 1024` (25,746 tokens KV); 128k requires the pinned
+  KV + disabled graph estimate above.
 - `glm5_next_mtp` speculative decoding is **capacity-blocked** on 2x96 GB:
   the MTP layer (+ ~3.5 GiB/card) OOMs during weight load, 606 MiB short.
   Not a code failure; needs TP=4 or smaller weights.
