@@ -98,9 +98,14 @@ behaves exactly as it does today.
 - **Contracts:** `overlays/generic-startup/manifest-r{1,2,3}.json` — r2 is the
   healthy rollback, r3 is failed/quarantined evidence. Do not retag either.
   `overlays/dsv4-startup/` and `plans/004-...` cover the DSv4 line.
-- **Note:** `codex/deepseek-v4-startup-handover` (`990a68092f`) is this same
-  branch plus one documentation commit. Same 702 lines of code — do not deploy
-  both.
+- **`codex/deepseek-v4-startup-handover` is now redundant.** Its only
+  difference was a documentation commit, which moved to `main`, so the two
+  branches are byte-identical. Use `codex/fastsafetensors-parallel-mtp-share`;
+  the other is kept only until nothing references it.
+- **Its `tests/` changes no longer apply to current upstream.** Upstream edited
+  `tests/v1/worker/test_gpu_worker.py` in #53591 after this branch's base. The
+  `vllm/` code applies clean — extract with `-- vllm/ csrc/` and port the test
+  changes by hand if you need them. The two smaller overlays are unaffected.
 
 ### `codex/glm53-sm120-nope-sparse-mla` — GLM-5.3-Flash on sm120 only
 
@@ -129,6 +134,10 @@ behaves exactly as it does today.
 
 All three branches touch **disjoint file sets** and have been verified to apply
 in sequence, in any order, onto one stock upstream tree. Deploy any subset.
+
+Verify with `-- vllm/ csrc/`. A whole-branch diff also carries `tests/`, which
+drifts against upstream faster than the code does and is not what a deployment
+consumes.
 
 Rule we hold ourselves to: **the branch is the atomic unit.** If a future
 overlay depends on another, it must carry that other overlay's changes rather
