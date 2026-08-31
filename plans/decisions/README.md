@@ -34,14 +34,31 @@ restore.
 | [006](006-package-patches-as-immutable-release-contracts.md) | Package source patches as immutable release contracts |
 | [007](007-lesson-measure-the-whole-startup-critical-path.md) | Measure the complete startup critical path and name every cache state |
 
-## Complete local branch ledger
+## Maintained-changes ledger
+
+**Re-audited 2026-08-31 against `upstream/main@5707355209`.** `main` was fast-forwarded to
+upstream on this date (it was 2284 behind and 0 ahead — it carried nothing of ours, so the
+sync was lossless). Every carried patch set below was re-verified with `git apply --check`
+against that upstream and **applies clean**; we are not fighting drift.
+
+| Patch set | Branch | Code carried | Upstream status |
+| --- | --- | ---: | --- |
+| Generic startup (loader geometry, adaptive O_DIRECT, startup-plan reuse, MM/AOT overlap) | `codex/fastsafetensors-parallel-mtp-share` | 702 lines / 21 files | Candidate. Reader controls + the 16 GiB `max_copy_block_size` default are a genuine upstream defect; adaptive O_DIRECT needs the `fastsafetensors` fork upstreamed first (two-repo chain) |
+| GLM-5.3 NoPE sparse MLA on sm120 | `codex/glm53-sm120-nope-sparse-mla` | 34 lines / 2 files | **Check first** — upstream PR #53906 "add GLM-5.3-Flash support" is open (93 files, +14k, needs FlashInfer 0.6.18); may already cover this path |
+| Reasoning output logging | `codex/dsv4-log-outputs-reasoning` | 26 lines / 2 files | **Send.** Upstream bug present in every build we run; previously reported as #24578 / #25918 / #19462 without diagnosis |
+
+Serving trees are not this fork: DSv4 runs `jasl/vllm` PR#41834 (`20260809`) and GLM-5.3 runs a
+local build (`487ecf187`, not on any remote). We author here and ship patches to those trees, so
+upstreaming reduces our maintenance burden but does **not** propagate to the fleet on its own.
+
+## Historical branch ledger
 
 This table was audited against every local `refs/heads` entry on 2026-08-24 and traced back through
 `dgx-spark`, `dgx-spark-v2`, `dgx-spark-v3`, `dgx-spark-v4`, and `dgx-spark-v5`.
 
 | Branch | Tip | Experiment provenance | Standing |
 | --- | --- | --- | --- |
-| `main` | `aa8bb5562e` | Fork baseline before the GLM and RTX experiment branches | Baseline only; the feature branches do not share one modern `main` base |
+| `main` | `5707355209` | Fast-forwarded to `upstream/main` on 2026-08-31; previously the frozen `aa8bb5562e` baseline | Now a clean upstream mirror — safe to branch from |
 | `glm-504b-gb10-sm121` | [`8e9c7ae071`](https://github.com/mardelden/vllm-custom/commit/8e9c7ae071ea9c00eb070004b268b1242aad3c1c) | Original DGX Spark GLM enablement; inherited by v2-v5 | Historical validated sm_121/sparse-MLA enablement branch |
 | `glm-504b-gb10-fast-loading` | [`f3871e287`](https://github.com/mardelden/vllm-custom/commit/f3871e28717dde9bb0b8cf1039aaab2968611d3e) | Canonical GLM loader/cache consolidation preserved by `dgx-spark-v5` | Retained historical implementation; all features off by default |
 | `fastsafetensors-loader-controls` | [`a62c29bba`](https://github.com/mardelden/vllm-custom/commit/a62c29bba699d2f5ba8f81e2fa4bc31712f16e23) | Isolated RTX/Qwen loader-control experiment recorded by the v5 handover | Superseded as a release by the composite branch; commit retained there |
