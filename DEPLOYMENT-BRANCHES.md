@@ -42,6 +42,12 @@ behaves exactly as it does today.
 - **Activation:** none. It corrects behaviour the existing
   `--enable-log-requests --enable-log-outputs` flags already request, which the
   `vllm` role already sets fleet-wide (`vllm_log_requests: true`).
+- **Ships with a file sink.** `overlays/request-logging/logging-config.json` is
+  a drop-in `VLLM_LOGGING_CONFIG_PATH` dictConfig that routes prompts,
+  completions and thinking to a rotating file under `/var/log/vllm/requests/`
+  (hourly, 168 kept) for bind-mounting. Config only, no extra code. It needs
+  this branch's code fix to be useful, since without it a reasoning model logs
+  no completion at all.
 - **Which hosts are affected today:** every vLLM container is `patch_set: stock`
   and therefore carries the defect. `vllm-chat` (Qwen3.6) and `vllm-code`
   (Qwen3.8) run reasoning-capable models and are actively dropping thinking.
