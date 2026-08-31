@@ -100,6 +100,29 @@ Generated response <id>: output: '[reasoning: \nOkay, the user...'      <- INFO
   busy engine could lose records with no error — a complete file and a holed
   journal is the worst outcome when comparing the two.
 
+## Turn off streaming deltas
+
+Add **`--no-enable-log-deltas`** alongside `--enable-log-requests
+--enable-log-outputs`.
+
+`enable_log_deltas` defaults to `True`, so `log_outputs` fires on **every
+streaming delta** — measured at ~850 lines and ~158 KB per request on real
+traffic. The deltas are redundant: `(streaming complete)` already carries the
+full accumulated text, and `previous_texts` is tracked independently of delta
+logging (`serving.py:445`, "Always track previous_texts for comprehensive output
+logging"), so nothing is lost.
+
+Present with the same `True` default in 0.21.0, the jasl DSv4 tree and current
+upstream — no patch needed, it is a stock flag.
+
+**Expect `[reasoning:` to drop to ~0 on streaming traffic.** Thinking is still
+captured, but as raw `<think>...</think>` inside the complete record rather than
+wrapped in the marker, which only the non-streaming path adds. Grep `<think>`
+for streaming turns and `[reasoning:` for non-streaming ones.
+
+Keep deltas available per-deployment: they are genuinely useful for debugging
+truncation and latency, where token arrival *timing* is the thing you need.
+
 ## Rotation is Python's job -- do not point logrotate at the live file
 
 `RotatingFileHandler` rotates and prunes on its own. The live file is
