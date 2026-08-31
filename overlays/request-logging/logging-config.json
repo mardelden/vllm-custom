@@ -23,7 +23,7 @@
       "class": "logging.handlers.RotatingFileHandler",
       "formatter": "capture",
       "level": "DEBUG",
-      "filename": "/var/log/inference/vllm-requests.log",
+      "filename": "/var/log/vllm/requests.log",
       "maxBytes": 134217728,
       "backupCount": 40,
       "encoding": "utf-8",
@@ -57,6 +57,27 @@
         "capture_file"
       ],
       "level": "DEBUG",
+      "propagate": false
+    },
+    "uvicorn": {
+      "handlers": [
+        "vllm"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.error": {
+      "handlers": [
+        "vllm"
+      ],
+      "level": "INFO",
+      "propagate": false
+    },
+    "uvicorn.access": {
+      "handlers": [
+        "vllm"
+      ],
+      "level": "INFO",
       "propagate": false
     }
   }

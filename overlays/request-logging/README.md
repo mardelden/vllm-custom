@@ -14,20 +14,24 @@ reasoning models log no completion at all (see `overlays/dsv4-logging/`).
 
 ```bash
 install -D -m644 logging-config.json /etc/vllm/logging-config.json
-mkdir -p /var/log/inference               # bind-mount this per container
+mkdir -p /var/log/vllm                    # bind-mount this per container
 export VLLM_LOGGING_CONFIG_PATH=/etc/vllm/logging-config.json
 ```
 
-`/var/log/inference/` is the fleet-standard path shared with sglang and
-llama.cpp, so all three engines land in one place. Give **each container its own
-host directory**:
+The in-container path follows vLLM's own convention (`/var/log/<service>/`).
+vLLM has no native log directory of its own -- it logs to stdout only -- so
+`/var/log/vllm/` is the closest thing to a default, and it keeps this config
+meaningful outside our fleet.
+
+Fleet uniformity is the **bind mount's** job, not the container's. Give each
+container its own host directory under whatever standard the collector wants:
 
 ```
--v /srv/logs/inference/<container>:/var/log/inference
+-v /srv/logs/inference/<container>:/var/log/vllm
 ```
 
-That is what keeps writers from colliding, so the in-container filename can stay
-fixed. A random filename suffix would also avoid collisions but makes files
+That is also what keeps writers from colliding, so the in-container filename can
+stay fixed. A random filename suffix would also avoid collisions but makes files
 unattributable, proliferates one file per restart, and `backupCount` prunes per
 handler so orphans from earlier runs are never cleaned up.
 
@@ -38,10 +42,10 @@ fleet hosts this is a file swap plus a mount.
 ## What it captures
 
 Verified on `vllm-build` with Qwen3-0.6B — one request produces four distinct
-lines in `/var/log/inference/vllm-requests.log`, all sharing a request id:
+lines in `/var/log/vllm/requests.log`, all sharing a request id:
 
 ```
-Request <id> details: prompt: '<|im_start|>user\nfilecapture zulu...'   <- DEBUG
+Request <id> details: prompt: '<|im_start|>user\nfinalcheck whiskey...' <- DEBUG
 Received request <id>: params: SamplingParams(...)                      <- INFO
 Generated response <id> details: output_token_ids: [...]                <- DEBUG
 Generated response <id>: output: '[reasoning: \nOkay, the user...'      <- INFO
@@ -74,6 +78,14 @@ Generated response <id>: output: '[reasoning: \nOkay, the user...'      <- INFO
   and uncaught tracebacks reach stderr regardless of Python logging, so
   systemd still captures startup and crash output. Verified: 0 request records
   leaked to stdout, startup lines still present.
+- **uvicorn's loggers must be named explicitly.** uvicorn configures its own
+  loggers at import time. A dictConfig that names none of them leaves them with
+  no handler, and its output disappears **silently** -- startup banner,
+  `Application startup complete`, and the HTTP access log all vanish, while
+  vLLM's own INFO logs keep flowing so nothing looks wrong. Measured: access-log
+  lines went 2 -> 0 before `uvicorn`, `uvicorn.error` and `uvicorn.access` were
+  added back. Readiness checks that grep for `Application startup complete`
+  break on this.
 - **Avoids journald's silent drops.** `RateLimitIntervalSec=30s` /
   `RateLimitBurst=10000` are at defaults on these hosts, and journald
   **discards** beyond that. Capture emits ~4 multi-KB records per request, so a
