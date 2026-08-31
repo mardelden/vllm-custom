@@ -31,6 +31,7 @@ wins** — it is the immutable release contract. This file is the index.
 | `codex/dsv4-log-outputs-reasoning` | **every vLLM deployment** | Fixes an upstream bug that silently drops model output for any reasoning model. Not tied to a model or GPU. |
 | `codex/fastsafetensors-parallel-mtp-share` | **opt-in, any model using `--load-format fastsafetensors`** | Two parts are generic loader fixes; one part is Qwen-specific and stays gated. |
 | `codex/glm53-sm120-nope-sparse-mla` | **GLM-5.3-Flash on sm120 only** | Enables a model that otherwise cannot start. Inert for every other model. |
+| `codex/qwen3-vl-skip-zero-video` | **Qwen3-VL only — nothing on this fleet** | Skips video geometry when no video is requested. Unmeasured. Carried for durability; not a deployment candidate today. |
 
 Everything defaults to **off**. A deployment that sets no environment variables
 behaves exactly as it does today.
@@ -135,10 +136,38 @@ behaves exactly as it does today.
 
 ---
 
+### `codex/qwen3-vl-skip-zero-video` — carried, not deployed
+
+- **Tip:** `13dd9c9858` · **base:** current `upstream/main` · **1 file, +10/−6**
+- **File:** `vllm/model_executor/models/qwen3_vl.py`
+- **What it does:** `get_dummy_mm_data` resolves override warnings, calls
+  `get_video_processor()` and reads merged mm kwargs *before* it checks
+  `num_videos`, so a text- or image-only request does that work and throws it
+  away. This returns early with an empty video list once the images are built.
+- **Do not deploy it as a performance change.** It is **unmeasured**, and the
+  processor lookup it skips is memoised by `cached_processor_from_config`, so on
+  a warm cache it saves only arithmetic. The meaningful case is a deployment
+  that never serves video, where it avoids building the HF processor at all.
+- **No container on this fleet runs Qwen3-VL** (`vllm-chat` Qwen3.6, `vllm-code`
+  Qwen3.8, `vllm-embed` Qwen3-Embedding, `vllm-ocr` olmOCR, `vllm-whisper`
+  whisper), and `qwen3_vl.py` is only imported for that architecture. Applying
+  it anywhere today is a no-op.
+- **Shares `qwen3_vl.py` with the startup branch** but touches a different
+  function (`get_dummy_mm_data` vs the startup branch's new
+  `get_warmup_processor_inputs`). Verified to compose in **both** orders.
+- **History:** written as `768c007dc6` during the RTX/Qwen work and parked;
+  rebased onto current upstream, where it still applies despite five intervening
+  upstream changes to this file.
+
 ## 3. Composability
 
-All three branches touch **disjoint file sets** and have been verified to apply
-in sequence, in any order, onto one stock upstream tree. Deploy any subset.
+The branches have been verified to apply in sequence, in any order, onto one
+stock upstream tree. Deploy any subset.
+
+The file-level disjointness check is **conservative**: `qwen3-vl-skip-zero-video`
+and the startup branch both touch `qwen3_vl.py`, yet compose cleanly because
+they edit different functions. Treat a file-level hit as "go verify by
+applying", not "these conflict".
 
 Verify with `-- vllm/ csrc/`. A whole-branch diff also carries `tests/`, which
 drifts against upstream faster than the code does and is not what a deployment
