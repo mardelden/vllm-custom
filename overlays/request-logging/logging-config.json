@@ -1,7 +1,6 @@
 {
   "version": 1,
   "disable_existing_loggers": false,
-
   "formatters": {
     "vllm": {
       "class": "vllm.logging_utils.NewLineFormatter",
@@ -13,7 +12,6 @@
       "format": "%(asctime)s %(message)s"
     }
   },
-
   "handlers": {
     "vllm": {
       "class": "logging.StreamHandler",
@@ -22,37 +20,42 @@
       "stream": "ext://sys.stdout"
     },
     "capture_file": {
-      "class": "logging.handlers.TimedRotatingFileHandler",
+      "class": "logging.handlers.RotatingFileHandler",
       "formatter": "capture",
       "level": "DEBUG",
-      "filename": "/var/log/vllm/requests/requests.log",
-      "when": "H",
-      "interval": 1,
-      "backupCount": 168,
+      "filename": "/var/log/inference/vllm-requests.log",
+      "maxBytes": 134217728,
+      "backupCount": 40,
       "encoding": "utf-8",
       "delay": true
     }
   },
-
   "loggers": {
     "vllm": {
-      "handlers": ["vllm"],
+      "handlers": [
+        "vllm"
+      ],
       "level": "INFO",
       "propagate": false
     },
-
     "vllm.entrypoints.logger": {
-      "handlers": ["vllm", "capture_file"],
+      "handlers": [
+        "capture_file"
+      ],
       "level": "DEBUG",
       "propagate": false
     },
     "vllm.entrypoints.request_logger": {
-      "handlers": ["vllm", "capture_file"],
+      "handlers": [
+        "capture_file"
+      ],
       "level": "DEBUG",
       "propagate": false
     },
     "vllm.entrypoints.serve.utils.request_logger": {
-      "handlers": ["vllm", "capture_file"],
+      "handlers": [
+        "capture_file"
+      ],
       "level": "DEBUG",
       "propagate": false
     }
