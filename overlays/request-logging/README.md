@@ -72,6 +72,14 @@ Generated response <id>: output: '[reasoning: \nOkay, the user...'      <- INFO
   (plans/049 wedged 14 containers). Bounded disk is the more important property
   for verbatim prompt capture. Either way, not SGLang's `backupCount=0`, which
   rotates but **never deletes**.
+- **One file for prompts and completions, not two.** They share a
+  `request_id`, so correlation is a grep. Splitting them would let a prompt be
+  pruned while its completion survives, since two files fill at different rates
+  -- an orphaned half of a pair is worth nothing when the whole point is showing
+  what the model received *and* returned. Verified under 8 concurrent requests:
+  32 records, **0 torn or interleaved lines**, 8/8 ids carrying both halves.
+  Python's logging locks per `emit()`, so records from different requests
+  interleave in order but never corrupt each other.
 - **Request content goes to the file only; journald keeps startup and crashes.**
   The three request loggers drop the stdout handler, so prompts and completions
   are not duplicated into the journal. The `vllm` logger still streams to stdout,
@@ -91,6 +99,37 @@ Generated response <id>: output: '[reasoning: \nOkay, the user...'      <- INFO
   **discards** beyond that. Capture emits ~4 multi-KB records per request, so a
   busy engine could lose records with no error — a complete file and a holed
   journal is the worst outcome when comparing the two.
+
+## Rotation is Python's job -- do not point logrotate at the live file
+
+`RotatingFileHandler` rotates and prunes on its own. The live file is
+`requests.log`; rotated artifacts are `requests.log.1` .. `requests.log.40`.
+Verified: with `backupCount=N` the handler deletes beyond N, so disk is bounded
+at ~5 GiB per container with **no external pruning needed**.
+
+This differs from SGLang, whose equivalent uses `backupCount=0` -- it rotates
+hourly and never deletes, so that deployment *does* need an external sweeper.
+Ours does not.
+
+Adding logrotate on the **live** file breaks it either way, silently:
+
+- `create` (default) -- logrotate renames the file and makes a new one. Python
+  still holds the old descriptor and keeps writing into the renamed file; the
+  new one stays empty.
+- `copytruncate` -- Python keeps its descriptor **and its byte offset**. After
+  truncation it writes at the old offset, producing a sparse file padded with
+  NULs.
+
+Same reason you cannot `rm` the log on a running server: measured **199 open
+descriptors still pointing at the unlinked inode**, with writes continuing into
+a file that no longer had a name. Restart the service, or leave rotation alone.
+
+If a sweeper is ever wanted anyway -- for example to prune faster than
+`backupCount` -- glob only the **rotated** pattern, never the live file:
+
+```bash
+find /var/log/vllm -name 'requests.log.[0-9]*' -mtime +7 -delete
+```
 
 ## Retention and privacy
 
