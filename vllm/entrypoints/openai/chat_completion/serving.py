@@ -1196,6 +1196,23 @@ class OpenAIServingChat(GenerateBaseServing):
                     tool_calls_str = ", ".join(tool_call_descriptions)
                     output_text = f"[tool_calls: {tool_calls_str}]"
 
+                # Reasoning models route thinking to the reasoning field, so a
+                # reasoning-only or truncated-mid-thought response leaves
+                # content empty and would otherwise log nothing at all. Mirrors
+                # the "[reasoning: ...]" convention the streaming delta path
+                # above already uses.
+                reasoning_text = (
+                    getattr(choice.message, "reasoning", None)
+                    or getattr(choice.message, "reasoning_content", None)
+                )
+                if reasoning_text:
+                    reasoning_part = f"[reasoning: {reasoning_text}]"
+                    output_text = (
+                        f"{reasoning_part} {output_text}"
+                        if output_text
+                        else reasoning_part
+                    )
+
                 if output_text:
                     # Get the corresponding output token IDs
                     output_token_ids = None

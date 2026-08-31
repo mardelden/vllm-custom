@@ -75,8 +75,11 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
         # Try using Completion types for type-safe parsing
         if chunk_data.get("object") == "chat.completion.chunk":
             chat_response = ChatCompletionStreamResponse.model_validate(chunk_data)
-            if chat_response.choices and chat_response.choices[0].delta.content:
-                return chat_response.choices[0].delta.content
+            if chat_response.choices:
+                delta = chat_response.choices[0].delta
+                # Reasoning models stream thinking in delta.reasoning; without
+                # it a reasoning-only response logs "no_content".
+                return delta.content or getattr(delta, "reasoning", None) or ""
         elif chunk_data.get("object") == "text_completion":
             completion_response = CompletionStreamResponse.model_validate(chunk_data)
             if completion_response.choices and completion_response.choices[0].text:
@@ -85,8 +88,10 @@ def _extract_content_from_chunk(chunk_data: dict) -> str:
         # Fallback to manual parsing
         if "choices" in chunk_data and chunk_data["choices"]:
             choice = chunk_data["choices"][0]
-            if "delta" in choice and choice["delta"].get("content"):
-                return choice["delta"]["content"]
+            if "delta" in choice and (
+                choice["delta"].get("content") or choice["delta"].get("reasoning")
+            ):
+                return choice["delta"].get("content") or choice["delta"]["reasoning"]
             elif choice.get("text"):
                 return choice["text"]
     return ""
