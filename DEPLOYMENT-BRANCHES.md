@@ -59,9 +59,14 @@ behaves exactly as it does today.
   (hourly, 168 kept) for bind-mounting. Config only, no extra code. It needs
   this branch's code fix to be useful, since without it a reasoning model logs
   no completion at all.
-- **Which hosts are affected today:** every vLLM container is `patch_set: stock`
-  and therefore carries the defect. `vllm-chat` (Qwen3.6) and `vllm-code`
-  (Qwen3.8) run reasoning-capable models and are actively dropping thinking.
+- **Which hosts are affected today:** the trigger is a configured
+  **`--reasoning-parser`**, not a reasoning-capable model. Without one, thinking
+  stays inside `content` and the unpatched code logs it fine. On this fleet only
+  DSv4 sets a parser (`deepseek_v4`), so it is the only deployment losing
+  thinking today — verified on `vllm-chat`, which has no parser and logs
+  thinking inline. Everywhere else the fix is a correct no-op worth carrying as
+  insurance: adding a parser later would otherwise start dropping thinking
+  silently.
 - **Evidence:** 12 GPU-free unit cases, plus a live A/B on `vllm-build` with
   Qwen3-0.6B — `Generated response` 1 → 2, reasoning lines 0 → 2, same server,
   same probes, only the patch changed.
