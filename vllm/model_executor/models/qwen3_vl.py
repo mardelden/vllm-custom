@@ -1112,6 +1112,15 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         target_image_width, target_image_height = (
             self.info.get_image_size_with_most_features()
         )
+        dummy_images = self._get_dummy_images(
+            width=target_image_width,
+            height=target_image_height,
+            num_images=num_images,
+            overrides=image_overrides,
+        )
+
+        if num_videos == 0:
+            return {"image": dummy_images, "video": []}
 
         # treat videos as special images
         target_num_frames = 2
@@ -1210,12 +1219,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
                 target_video_height = min(target_video_height, height_override)
 
         return {
-            "image": self._get_dummy_images(
-                width=target_image_width,
-                height=target_image_height,
-                num_images=num_images,
-                overrides=image_overrides,
-            ),
+            "image": dummy_images,
             "video": self._get_dummy_videos(
                 width=target_video_width,
                 height=target_video_height,
