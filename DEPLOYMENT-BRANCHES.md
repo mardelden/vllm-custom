@@ -31,7 +31,7 @@ wins** — it is the immutable release contract. This file is the index.
 | `codex/dsv4-log-outputs-reasoning` | **every vLLM deployment** | Fixes an upstream bug that silently drops model output for any reasoning model. Not tied to a model or GPU. |
 | `codex/fastsafetensors-parallel-mtp-share` | **opt-in, any model using `--load-format fastsafetensors`** | Two parts are generic loader fixes; one part is Qwen-specific and stays gated. |
 | `codex/glm53-sm120-nope-sparse-mla` | **GLM-5.3-Flash on sm120 only** | Enables a model that otherwise cannot start. Inert for every other model. |
-| `codex/qwen3-vl-skip-zero-video` | **Qwen3-VL only — nothing on this fleet** | Skips video geometry when no video is requested. Unmeasured. Carried for durability; not a deployment candidate today. |
+| `codex/qwen3-vl-skip-zero-video` | **any Qwen3.5-family deployment that does not serve video** | Skips video geometry when no video is requested. Fires on `vllm-code` today (`--limit-mm-per-prompt '{"image":4}'`). Unmeasured. |
 
 Everything defaults to **off**. A deployment that sets no environment variables
 behaves exactly as it does today.
@@ -148,10 +148,25 @@ behaves exactly as it does today.
   processor lookup it skips is memoised by `cached_processor_from_config`, so on
   a warm cache it saves only arithmetic. The meaningful case is a deployment
   that never serves video, where it avoids building the HF processor at all.
-- **No container on this fleet runs Qwen3-VL** (`vllm-chat` Qwen3.6, `vllm-code`
-  Qwen3.8, `vllm-embed` Qwen3-Embedding, `vllm-ocr` olmOCR, `vllm-whisper`
-  whisper), and `qwen3_vl.py` is only imported for that architecture. Applying
-  it anywhere today is a no-op.
+- **Scope is the shared builder, not the model name.** `Qwen3VLDummyInputsBuilder`
+  lives in `qwen3_vl.py` but is reused by eight model modules, including
+  `qwen3_5.py` — which serves both `Qwen3_5ForConditionalGeneration` and
+  `Qwen3_5MoeForConditionalGeneration`. So it applies far beyond models with
+  "VL" in the name:
+
+  | container | architecture | module | uses builder |
+  | --- | --- | --- | --- |
+  | `vllm-code` (Qwen3.8) | `Qwen3_5ForConditionalGeneration` | `qwen3_5` | **yes** |
+  | `vllm-chat` (Qwen3.6) | `Qwen3_5MoeForConditionalGeneration` | `qwen3_5` | **yes** |
+  | `vllm-ocr` (olmOCR) | `Qwen2_5_VLForConditionalGeneration` | `qwen2_5_vl` | no |
+  | `vllm-embed` | `Qwen3ForCausalLM` | `qwen3` | no |
+  | `vllm-whisper` | `WhisperForConditionalGeneration` | `whisper` | no |
+
+- **Whether it fires depends on the video count, i.e. on `--limit-mm-per-prompt`.**
+  `vllm-code` sets `'{"image":4}'` with no video key, so `num_videos` is 0 and
+  the early return **does** take effect there. `vllm-chat` sets no limit, so
+  profiling uses the model maximum, video count is non-zero and the patch is
+  inert but harmless.
 - **Shares `qwen3_vl.py` with the startup branch** but touches a different
   function (`get_dummy_mm_data` vs the startup branch's new
   `get_warmup_processor_inputs`). Verified to compose in **both** orders.
