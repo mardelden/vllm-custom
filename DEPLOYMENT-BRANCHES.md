@@ -4,9 +4,20 @@
 **Last verified:** 2026-08-31 against `upstream/main@5707355209`.
 
 This is the answer to "which of your branches do we deploy, and where?"
-It lives on `main` because `main` is the only branch that is never rebased,
-never deleted, and is what GitHub shows by default. Everything else in this
-repo moves.
+
+**All documentation and every overlay artifact lives on `main`** — this
+catalogue, `plans/`, `plans/decisions/`, `overlays/**` (patches, manifests,
+configs, installers, tests) and `checkpoints/`. `main` is the only branch that
+is never rebased or deleted, so it is the one stable place to point anyone at.
+
+**Topic branches carry code only.** That keeps them minimal, keeps their file
+sets disjoint so any subset composes, and means you never have to know which
+branch a document is on.
+
+Consequence worth knowing: an overlay `.patch` on `main` is a *snapshot* of its
+branch. If the branch code changes, regenerate the artifact. When they disagree,
+the branch is authoritative for code and the manifest is authoritative for the
+release contract.
 
 If anything here disagrees with a manifest under `overlays/`, **the manifest
 wins** — it is the immutable release contract. This file is the index.

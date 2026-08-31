@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "id": "vllm-generic-startup",
+  "release": 3,
+  "status": "deployment-candidate",
+  "summary": "Release 3 retains the healthy release 2 runtime closure and restores the material persisted-cache and overlap stack that produced approximately 15-second page-cold API readiness in the source experiments.",
+  "scope": "engine",
+  "supersedes": {
+    "release": 2,
+    "manifest": "manifest-r2.json",
+    "rollout_state": "healthy-production",
+    "immutability_guard": "Release 2, its manifest, and its derived image remain unchanged. Build and select a new release 3 image; never retag or mutate release 2 in place."
+  },
+  "source": {
+    "repository": "https://github.com/mardelden/vllm-custom",
+    "development_branch": "codex/fastsafetensors-parallel-mtp-share",
+    "base_commit": "ba07e4a48fc951300d97eb506217dd530583dea3",
+    "code_commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+    "python_package_path": "vllm",
+    "python_package_git_tree": "ca93282614ec21c41a5b67191048abd5ec8309d3"
+  },
+  "delivery": {
+    "mode": "full-python-package-overlay",
+    "requires_derived_image": true,
+    "requires_image_rebuild": true,
+    "allow_runtime_bind_mount": false,
+    "preserve_compiled_extensions_from_base_image": true,
+    "application_guard": "Export the complete vllm Python package from source.code_commit. Do not copy only the release 3 changed files onto either release 2 or the v0.27.1 Python package.",
+    "configuration_guard": "A profile/configuration run may select an existing image for this patch set, but must not build or modify it.",
+    "release_guard": "The fleet must assign release 3 a new immutable image tag and digest. Release 2 remains the rollback target until every release 3 promotion gate passes."
+  },
+  "components": [
+    {
+      "id": "multimodal-warmup-overlap",
+      "commit": "809eb0bcb7ec2a841adf6419a3372ff502f5dfdf",
+      "scope": "engine-with-qwen3-vl-input-specialization",
+      "reason": "Move processor warmup off the serial engine-start critical path while retaining warmup behavior.",
+      "removal_condition": "Remove after an equivalent upstream implementation is present in the pinned base."
+    },
+    {
+      "id": "fastsafetensors-loader-controls",
+      "commit": "5684372cc95f592142320ed50cbee88098365e84",
+      "scope": "generic-loader",
+      "reason": "Expose queue depth, reader count, bounce-buffer size, copy-block size, and direct-I/O selection through model_loader_extra_config.",
+      "removal_condition": "Remove after the installed vLLM and FastSafetensors releases expose equivalent validated controls."
+    },
+    {
+      "id": "qwen-fastsafetensors-filter-and-mtp-share",
+      "commit": "53e1502cb315e41567ef9c3efb452afd71e666d2",
+      "scope": "qwen3.5-and-qwen3.5-mtp",
+      "reason": "Avoid materializing non-local Qwen byte ranges and avoid duplicate MTP embedding and lm_head loads.",
+      "removal_condition": "Remove after the Qwen implementations upstream provide equivalent filtering and weight sharing."
+    },
+    {
+      "id": "adaptive-fastsafetensors-direct-io",
+      "commit": "3673260f2b5f37c3d3effa9b28536ba7e6d89404",
+      "scope": "generic-loader",
+      "reason": "Use aligned O_DIRECT reads for cold selected ranges and buffered reads for resident checkpoints.",
+      "removal_condition": "Remove after the behavior is available in compatible released vLLM and FastSafetensors versions."
+    },
+    {
+      "id": "exact-startup-plan-reuse",
+      "commit": "74cd835791f19eb0abbcd843a4e307e5e993c519",
+      "scope": "generic-engine",
+      "reason": "Persist and reuse an exact KV allocation so redundant multimodal memory profiling can be skipped without disabling compilation, warmup, sampling, or CUDA graphs.",
+      "removal_condition": "Remove after the pinned vLLM release persists the exact allocation with equivalent fingerprinting and invalidation."
+    },
+    {
+      "id": "persisted-multimodal-max-token-budget",
+      "commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+      "scope": "generic-multimodal-engine",
+      "reason": "Persist the fingerprinted per-modality maximum-token result that otherwise costs about five seconds independently in the API and EngineCore processes.",
+      "removal_condition": "Remove after equivalent fingerprinted, fail-open multimodal budget persistence is upstream."
+    },
+    {
+      "id": "frontend-enginecore-construction-overlap",
+      "commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+      "scope": "generic-api-engine",
+      "reason": "Construct the renderer and input/output processors concurrently with EngineCore process launch and model initialization.",
+      "removal_condition": "Remove after equivalent frontend construction overlap is upstream."
+    },
+    {
+      "id": "early-forkserver-preload",
+      "commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+      "scope": "multiprocessing-api-launch",
+      "reason": "Start an AsyncLLM-preloaded forkserver before importing the large API-server parent graph and make the normal forkserver setup idempotent.",
+      "removal_condition": "Remove after the standard launcher starts the preloaded forkserver before its heavy import graph."
+    },
+    {
+      "id": "startup-plan-cache-sized-profile",
+      "commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+      "scope": "generic-gpu-runner",
+      "reason": "On an exact startup-plan hit, profile the language model with the required request/CUDA-graph size rather than max_num_batched_tokens while retaining compilation, sampling, and CUDA graphs.",
+      "removal_condition": "Remove after upstream startup-plan reuse selects a bounded but correctness-complete profiling shape."
+    },
+    {
+      "id": "aot-deserialization-weight-load-overlap",
+      "commit": "4f1cd0856c291c099c30f4afd5a8c7cbed3b8e70",
+      "scope": "generic-aot-compile-loader",
+      "reason": "Persist a fingerprinted alias to the validated AOT artifact, deserialize it in a background thread during weight reads, and accept it only when its resolved path matches the current full AOT hash.",
+      "removal_condition": "Remove after upstream overlaps safe AOT artifact deserialization with model loading."
+    }
+  ],
+  "dependencies": [
+    {
+      "name": "fastsafetensors",
+      "version": "0.3.3",
+      "repository": "https://github.com/mardelden/fastsafetensors",
+      "branch": "codex/adaptive-odirect-nogds",
+      "commit": "b43888df0eac286849f1238b7e42e254ee1d285f",
+      "install_phase": "image-build",
+      "reason": "Provides bounded parallel no-GDS reads and adaptive aligned O_DIRECT support required by this patch set."
+    }
+  ],
+  "compatibility": {
+    "tested_runtime": {
+      "python": "3.11",
+      "cuda": "12.9",
+      "binary_vllm_package": "0.27.1+cu129",
+      "flashinfer_python": "0.6.16.post3",
+      "fastsafetensors": "0.3.3 at b43888df0eac286849f1238b7e42e254ee1d285f",
+      "gpu": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+      "model": "unsloth/Qwen3.8-27B-NVFP4",
+      "model_revision": "7d6f8d4d72f56b92b3cdbf22f156b90e1bab0108"
+    },
+    "source_rule": "The Python source is pinned to source.code_commit, which is based on source.base_commit from upstream/main and is not the v0.27.1 release source tree.",
+    "porting_rule": "For a different vLLM source release, port every component, update this manifest, and repeat unit, startup, correctness, memory, and serving-performance gates before deployment."
+  },
+  "activation": {
+    "environment": {
+      "PATH": "/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "FLASHINFER_WORKSPACE_BASE": "/var/cache/vllm",
+      "HF_HUB_OFFLINE": "1",
+      "TRANSFORMERS_OFFLINE": "1",
+      "VLLM_CACHE_ROOT": "/var/cache/vllm",
+      "VLLM_ENABLE_AOT_LOAD_OVERLAP": "1",
+      "VLLM_ENABLE_STARTUP_PLAN": "1",
+      "VLLM_WORKER_MULTIPROC_METHOD": "forkserver"
+    },
+    "launch": {
+      "python_module": "vllm.entrypoints.openai.api_server_bootstrap",
+      "argument_contract": "Pass the same serve arguments currently used by the release 2 profile after the module name. Do not invoke the standard vllm CLI for this patch set because it starts the preload forkserver after the large parent import graph."
+    },
+    "serve_configuration": {
+      "load_format": "fastsafetensors",
+      "model_loader_extra_config": {
+        "queue_size": -1,
+        "max_threads": 16,
+        "bbuf_size_kb": 16384,
+        "max_copy_block_size": 536870912,
+        "use_o_direct": "auto"
+      }
+    },
+    "artifact_precondition": "Before enabling offline mode, synchronize the complete pinned model snapshot, tokenizer, processor, configuration, and any remote code required by the profile. A missing local artifact is a failed deployment, not permission to silently remove the offline flags."
+  },
+  "runtime_requirements": {
+    "mounts": [
+      {
+        "host_path": "/usr/local/cuda",
+        "container_path": "/usr/local/cuda",
+        "mode": "read-only",
+        "required_path": "/usr/local/cuda/bin/nvcc",
+        "reason": "FlashInfer XQA requires either compatible precompiled cubins or a CUDA compiler. This release uses the production host toolkit for JIT compilation."
+      },
+      {
+        "host_path": "/var/cache/vllm",
+        "container_path": "/var/cache/vllm",
+        "mode": "read-write",
+        "required_path": "/var/cache/vllm",
+        "reason": "Persist vLLM startup plans, multimodal budgets, Torch/AOT artifacts and aliases, and FlashInfer JIT artifacts across container removal and model switches."
+      }
+    ],
+    "required_executables": [
+      "/usr/local/cuda/bin/nvcc"
+    ],
+    "persistent_cache_paths": [
+      "/var/cache/vllm/startup_plan",
+      "/var/cache/vllm/torch_compile_cache",
+      "/var/cache/vllm/.cache/flashinfer"
+    ],
+    "runtime_guard": "Apply the activation environment before importing vLLM, FlashInfer, Transformers, or Hugging Face Hub. Run preflights inside the candidate image with the production mounts, not against the unmounted image filesystem."
+  },
+  "preflight": {
+    "id": "executable-flashinfer-xqa-prerequisite",
+    "execution_context": "Inside the candidate container with the production mounts and activation environment applied",
+    "argv": [
+      "python3",
+      "-c",
+      "import shutil; from vllm.utils.flashinfer import has_flashinfer; assert shutil.which('nvcc') == '/usr/local/cuda/bin/nvcc'; assert has_flashinfer()"
+    ],
+    "required_exit_code": 0,
+    "reason": "An import-only FlashInfer check does not prove that the selected XQA backend can execute."
+  },
+  "additional_preflights": [
+    {
+      "id": "release-3-python-surface",
+      "execution_context": "Inside the candidate container with the activation environment applied, without starting the service",
+      "argv": [
+        "python3",
+        "-c",
+        "import vllm; from vllm.compilation.decorators import preload_aot_compiled_fn; from vllm.entrypoints.openai.api_server_bootstrap import main; from vllm.multimodal.encoder_budget import _load_mm_max_tokens_cache; assert callable(preload_aot_compiled_fn) and callable(main) and callable(_load_mm_max_tokens_cache)"
+      ],
+      "required_exit_code": 0,
+      "reason": "Fail closed if the image contains the release 2 package or a partial file overlay instead of the complete pinned release 3 package tree."
+    }
+  ],
+  "validation": {
+    "historical_evidence": {
+      "release_2_fleet": {
+        "result": "healthy-production",
+        "warm_api_readiness_seconds": 57,
+        "model_load_seconds": 2.4,
+        "interpretation": "Release 2 validates the loader, XQA runtime closure, and exact startup-plan path but does not contain the later combined approximately 15-second startup stack."
+      },
+      "release_3_source_experiments": {
+        "measurement": "Fresh service process and API container, Qwen checkpoint pages explicitly evicted, persistent compile/startup caches retained, /health polled until success.",
+        "combined_fastpoll_seconds": [
+          15.073,
+          15.58,
+          15.576
+        ],
+        "best_complete_stack_seconds": 14.914,
+        "qualification": "These measurements came from the source experiment environment, not the final release 3 immutable Docker image. Fleet promotion therefore uses a 20-second ceiling rather than treating 14.914 seconds as an attested image result."
+      }
+    },
+    "source_validation": [
+      "Repository pre-commit hooks passed for all release 3 source and test files, including Ruff, mypy, SPDX, import, environment-schema, and forbidden-API checks.",
+      "Four targeted unit tests passed in a disposable container based on the exact live release 2 image.",
+      "The AOT alias test rejected a stale resolved artifact path and consumed the matching artifact deserialized during weight loading.",
+      "An executable disposable-container gate started the forkserver before importing the API launcher and then repeated the normal launcher setup idempotently."
+    ],
+    "promotion_gates": [
+      {
+        "id": "cache-population",
+        "requirements": [
+          "Start release 3 once with the persistent cache mount and complete one representative MTP request; this population boot may exceed 20 seconds.",
+          "Verify non-empty startup-plan, multimodal max-token, Torch AOT/Inductor, AOT preload-alias, and FlashInfer XQA cache artifacts under the declared persistent paths.",
+          "Stop and remove the container without deleting the cache mount."
+        ]
+      },
+      {
+        "id": "page-cold-api-readiness",
+        "requirements": [
+          "Evict only the pinned Qwen checkpoint file pages while retaining the declared persistent startup and compilation caches.",
+          "Create a new container from the same immutable release 3 image and profile.",
+          "Measure from container process start until the configured API readiness endpoint first succeeds.",
+          "Run three independent page-cold repetitions; every repetition must be at most 20.0 seconds and the container restart counter must remain zero.",
+          "The logs must show an exact persisted startup-plan hit, an applied multimodal max-token cache, cache-sized language-model profiling, and use of an AOT artifact deserialized during weight loading."
+        ]
+      },
+      {
+        "id": "adaptive-weight-loading",
+        "requirements": [
+          "On the page-cold repetition, capture evidence that FastSafetensors selected its cold aligned O_DIRECT path and keep total model loading at or below 5.0 seconds.",
+          "On an immediate repetition without checkpoint-page eviction, capture evidence that FastSafetensors selected its resident buffered path and keep total model loading at or below 5.0 seconds.",
+          "Both paths must load the target and MTP weights successfully with the configured bounded loader geometry."
+        ]
+      },
+      {
+        "id": "xqa-api-zero-restart",
+        "requirements": [
+          "The service log selects decode_backend=xqa.",
+          "The engine completes profile_cudagraph_memory and CUDA-graph setup without a FlashInfer backend error.",
+          "The configured API readiness endpoint succeeds.",
+          "The service and container restart counters remain zero from launch through readiness and the representative serving check."
+        ]
+      },
+      {
+        "id": "persistent-flashinfer-cache-reuse",
+        "requirements": [
+          "Record the non-empty FlashInfer cache artifact paths after the population run.",
+          "After container removal and recreation with the same cache mount, readiness succeeds with XQA and zero restarts without rebuilding the recorded artifacts.",
+          "The recorded artifacts remain present and are reused from the persistent mount."
+        ]
+      },
+      {
+        "id": "serving-correctness-and-performance",
+        "requirements": [
+          "Run the fixed correctness request and representative MTP depth-5 generation used for release 2.",
+          "Compare output correctness, TTFT, ITL, throughput, and peak host RAM/VRAM with release 2 and reject material regressions.",
+          "Prove direct rollback to the immutable release 2 image/profile."
+        ]
+      }
+    ]
+  },
+  "excluded_experiments": [
+    {
+      "id": "flashinfer-connectivity-prefetch",
+      "observed_delta_seconds": 0.13,
+      "reason": "Below the agreed materiality threshold."
+    },
+    {
+      "id": "complete-multimodal-budget-cache-and-lazy-tokenizers",
+      "observed_delta_seconds": 0.25,
+      "reason": "The later extension is below the materiality threshold. Release 3 includes only the earlier max-token result cache that removed about ten seconds across the API and EngineCore processes."
+    },
+    {
+      "id": "custom-op-wrapper-cache",
+      "observed_delta_seconds": 0.09,
+      "reason": "Constructor-only gain with no stable end-to-end win."
+    },
+    {
+      "id": "lazy-torchinductor-patch",
+      "observed_delta_seconds": 0.57,
+      "reason": "Below the agreed materiality threshold."
+    },
+    {
+      "id": "direct-qwen-tokenizer-construction",
+      "observed_delta_seconds": 0.87,
+      "reason": "Below the agreed materiality threshold and model-specific maintenance cost."
+    },
+    {
+      "id": "reasoning-token-cache-and-resident-chat-template-reuse",
+      "reason": "Excluded to keep release 3 generic and maintainable; the material release target is expected to pass without these model/frontend-specific caches."
+    }
+  ],
+  "external_fleet_requirements": [
+    "Keep the shared-role FlashInfer 0.6.16 Python 3.11 shim that inserts 'from __future__ import annotations' in fd_exchange.py.",
+    "Keep the shared-role dependency pins fastapi==0.136.3, starlette==0.52.1, and prometheus-fastapi-instrumentator==7.1.0.",
+    "Inject Hugging Face credentials through the fleet secret mechanism for artifact synchronization only; do not place tokens in the image, manifest, profile, service unit, or offline runtime."
+  ],
+  "rollback": {
+    "method": "Select the immutable release 2 image and profile. Do not mutate release 2 or remove its working runtime mounts while release 3 is being evaluated.",
+    "data": "Release 3 startup, Torch, and FlashInfer directories are regenerable cache data and may remain on disk; release-specific fingerprints and full artifact paths prevent them from being accepted as another release's identity."
+  }
+}
