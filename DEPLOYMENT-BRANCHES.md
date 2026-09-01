@@ -32,6 +32,7 @@ wins** — it is the immutable release contract. This file is the index.
 | `codex/fastsafetensors-parallel-mtp-share` | **opt-in, any model using `--load-format fastsafetensors`** | Two parts are generic loader fixes; one part is Qwen-specific and stays gated. |
 | `codex/glm53-sm120-nope-sparse-mla` | **GLM-5.3-Flash on sm120 only** | Enables a model that otherwise cannot start. Inert for every other model. |
 | `codex/qwen3-vl-skip-zero-video` | **any Qwen3.5-family deployment that does not serve video** | Skips video geometry when no video is requested. Fires on `vllm-code` today (`--limit-mm-per-prompt '{"image":4}'`). Unmeasured. |
+| `codex/reasoning-effort-family-gate` | **every vLLM deployment** | Rejects `reasoning_effort` values a model family's chat template would silently fold, upgrade, or ignore. 400 naming the supported values. Passthrough for unknown families. |
 
 Everything defaults to **off**. A deployment that sets no environment variables
 behaves exactly as it does today.
@@ -173,6 +174,43 @@ behaves exactly as it does today.
 - **History:** written as `768c007dc6` during the RTX/Qwen work and parked;
   rebased onto current upstream, where it still applies despite five intervening
   upstream changes to this file.
+
+---
+
+### `codex/reasoning-effort-family-gate` — deploy fleet-wide
+
+- **Tip:** `1b5f881d25` · **base:** current `upstream/main` (`d0e695a91b`) ·
+  **4 files, +204/−0** (2 new: gate module + unit tests)
+- **Files:** `vllm/entrypoints/reasoning_effort.py` (new),
+  `vllm/entrypoints/openai/chat_completion/serving.py`,
+  `vllm/entrypoints/openai/responses/serving.py`,
+  `tests/entrypoints/openai/test_reasoning_effort_gate.py` (new)
+- **What it fixes:** chat templates fold unsupported `reasoning_effort` values
+  silently instead of raising. Measured on the fleet's own checkpoints:
+  GLM-5.3 upgrades `none`/`minimal`/`medium`/`xhigh` to **Max** (thinking
+  cannot be disabled at all); Qwen3.6's template ignores the value wholesale;
+  Qwen3.8 (unsloth) folds `high` → xhigh; DeepSeek V4 buckets seven API values
+  into three prompts. A client gets a 200 and believes the setting was honored.
+- **How:** a hand-maintained vocabulary keyed by `hf_config.model_type`
+  (`qwen3_5`, `qwen3_5_moe`, `qwen4_exp`, `glm5_next`, `deepseek_v4`) of the
+  values each family's template genuinely expresses. Anything else is rejected
+  **before template rendering** with a 400 naming the supported values. Both
+  carriers are gated: the `reasoning_effort` request field and
+  `chat_template_kwargs["reasoning_effort"]`. Covers `/v1/chat/completions`,
+  `/v1/responses`, and the Anthropic endpoint (subclasses chat serving, so
+  `output_config.effort` funnels through the same gate).
+- **Default-safe:** families without a vocabulary entry pass through unchanged.
+  Override or disable via `VLLM_REASONING_EFFORT_VOCABULARY` (unset = in-tree
+  defaults · `off` = disabled · path to a JSON file merged over the defaults,
+  `null` removes a family). Update the JSON when a new family lands — that is
+  the maintenance model, by design.
+- **Evidence:** 7/7 unit tests; live A/B on `vllm-build` (Qwen3-0.6B with a
+  vocabulary override): supported value 200, folded value 400 with message,
+  `chat_template_kwargs` carrier 400, no-effort 200, Responses API 400.
+- **Sibling:** the same idea already ships for llama.cpp as
+  `proxmox/roles/llamacpp/files/patches/anthropic-output-config-effort.patch`;
+  SGLang has the analysis but no fix
+  (`proxmox/plans/handovers/sglang-anthropic-effort-mapping.md`).
 
 ## 3. Composability
 
