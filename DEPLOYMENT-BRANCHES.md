@@ -32,7 +32,7 @@ wins** — it is the immutable release contract. This file is the index.
 | `codex/fastsafetensors-parallel-mtp-share` | **opt-in, any model using `--load-format fastsafetensors`** | Two parts are generic loader fixes; one part is Qwen-specific and stays gated. |
 | `codex/glm53-sm120-nope-sparse-mla` | **GLM-5.3-Flash on sm120 only** | Enables a model that otherwise cannot start. Inert for every other model. |
 | `codex/qwen3-vl-skip-zero-video` | **any Qwen3.5-family deployment that does not serve video** | Skips video geometry when no video is requested. Fires on `vllm-code` today (`--limit-mm-per-prompt '{"image":4}'`). Unmeasured. |
-| `codex/reasoning-effort-family-gate` | **every vLLM deployment** | Rejects `reasoning_effort` values a model family's chat template would silently fold, upgrade, or ignore. 400 naming the supported values. Passthrough for unknown families. |
+| `codex/reasoning-effort-family-gate` | **every vLLM deployment** | Rejects `reasoning_effort` values the deployed artifact's chat template would silently fold, upgrade, or ignore. Vocabulary declared per profile (`reasoning_efforts` convention); unset = stock passthrough. |
 
 Everything defaults to **off**. A deployment that sets no environment variables
 behaves exactly as it does today.
@@ -179,37 +179,70 @@ behaves exactly as it does today.
 
 ### `codex/reasoning-effort-family-gate` — deploy fleet-wide
 
-- **Tip:** `1b5f881d25` · **base:** current `upstream/main` (`d0e695a91b`) ·
-  **4 files, +204/−0** (2 new: gate module + unit tests)
+- **Tip:** `7b224028c3` · **base:** current `upstream/main` (`d0e695a91b`) ·
+  **3 files, +149/−0** (2 new; 3 lines in `online_renderer.py`)
 - **Files:** `vllm/entrypoints/reasoning_effort.py` (new),
-  `vllm/entrypoints/openai/chat_completion/serving.py`,
-  `vllm/entrypoints/openai/responses/serving.py`,
+  `vllm/renderers/online_renderer.py` (3-line hook),
   `tests/entrypoints/openai/test_reasoning_effort_gate.py` (new)
 - **What it fixes:** chat templates fold unsupported `reasoning_effort` values
   silently instead of raising. Measured on the fleet's own checkpoints:
   GLM-5.3 upgrades `none`/`minimal`/`medium`/`xhigh` to **Max** (thinking
   cannot be disabled at all); Qwen3.6's template ignores the value wholesale;
-  Qwen3.8 (unsloth) folds `high` → xhigh; DeepSeek V4 buckets seven API values
-  into three prompts. A client gets a 200 and believes the setting was honored.
-- **How:** a hand-maintained vocabulary keyed by `hf_config.model_type`
-  (`qwen3_5`, `qwen3_5_moe`, `qwen4_exp`, `glm5_next`, `deepseek_v4`) of the
-  values each family's template genuinely expresses. Anything else is rejected
-  **before template rendering** with a 400 naming the supported values. Both
-  carriers are gated: the `reasoning_effort` request field and
-  `chat_template_kwargs["reasoning_effort"]`. Covers `/v1/chat/completions`,
-  `/v1/responses`, and the Anthropic endpoint (subclasses chat serving, so
-  `output_config.effort` funnels through the same gate).
-- **Default-safe:** families without a vocabulary entry pass through unchanged.
-  Override or disable via `VLLM_REASONING_EFFORT_VOCABULARY` (unset = in-tree
-  defaults · `off` = disabled · path to a JSON file merged over the defaults,
-  `null` removes a family). Update the JSON when a new family lands — that is
-  the maintenance model, by design.
-- **Evidence:** 7/7 unit tests; live A/B on `vllm-build` (Qwen3-0.6B with a
-  vocabulary override): supported value 200, folded value 400 with message,
-  `chat_template_kwargs` carrier 400, no-effort 200, Responses API 400.
-- **Sibling:** the same idea already ships for llama.cpp as
-  `proxmox/roles/llamacpp/files/patches/anthropic-output-config-effort.patch`;
-  SGLang has the analysis but no fix
+  Qwen3.8 (unsloth) folds `high` → xhigh while Flash-Next raises on it;
+  DeepSeek V4 buckets seven API values into three prompts. A client gets a
+  200 and believes the setting was honored.
+- **Principle (shared fleet concept, same as the llama.cpp implementation):**
+  honor an effort level verbatim or reject it naming the levels this
+  deployment distinguishes — never remap, never clamp, never let the
+  template's fallback decide. `none` is a normal vocabulary member: a model
+  that cannot not-think omits it, so disable-thinking requests fail loudly.
+- **Operator-declared, not family-detected.** The vocabulary is a property of
+  the exact shipped artifact — the two Qwen3.8 checkpoints above prove copies
+  of one family diverge — so there is no in-tree table. The deployment
+  declares `VLLM_REASONING_EFFORT_ACCEPTED` (comma list, order preserved in
+  error messages). This is the vLLM rendering of the fleet's per-profile
+  `reasoning_efforts` key; the `vllm` role's existing per-profile `extra_env`
+  carries it with zero role changes:
+
+  ```yaml
+  extra_env:
+    VLLM_REASONING_EFFORT_ACCEPTED: "low,high,max"   # e.g. GLM-5.3
+  ```
+
+- **Single choke point.** Validation runs on the merged
+  `chat_template_kwargs` in `preprocess_chat`, just before template
+  rendering — one check covers `/v1/chat/completions`, the Responses API,
+  the Anthropic endpoint, `/tokenize`, the raw `chat_template_kwargs`
+  carrier, and the server's own `--default-chat-template-kwargs`. An
+  operator default outside the vocabulary **fails at startup**, not per
+  request. Rejections are 400 `BadRequestError` with
+  `param=reasoning_effort`, naming the declared values.
+- **Default-safe:** env unset or empty = stock passthrough; the branch is a
+  no-op until a deployment declares its vocabulary.
+- **Verified vocabularies for today's fleet** (rendered per checkpoint, all
+  eight API levels):
+
+  | artifact | `reasoning_efforts` |
+  | --- | --- |
+  | `unsloth/Qwen3.8-27B-NVFP4` (vllm-code) | `[none, low, medium, xhigh]` |
+  | `RedHatAI/Qwen3.6-35B-A3B-NVFP4` (vllm-chat) | `[none]` |
+  | `Qwen/Qwen3.8-Flash-Next-FP8` | `[none, low, medium, xhigh]` |
+  | `RedHatAI/GLM-5.3-Flash-NVFP4` | `[low, high, max]` |
+  | `MJPansa/DeepSeek-V4-Flash-0731-NVFP4` | `[none, low, high, max]` |
+
+- **Evidence:** 7/7 unit tests; live on `vllm-build` (Qwen3-0.6B, declared
+  `none,low,high`): declared level 200, undeclared 400 with message + param,
+  `chat_template_kwargs` carrier 400, `/tokenize` 400, Responses API 400,
+  no-effort 200; bad `--default-chat-template-kwargs` aborts startup with
+  `VLLMValidationError`.
+- **Caveats:** the top-level `reasoning_effort` field is pydantic-constrained
+  to the seven OpenAI/DeepSeek literals before the gate sees it (unknown
+  strings 422 there; the `chat_template_kwargs` carrier is unconstrained and
+  fully gated). GPT-OSS/harmony bypasses `preprocess_chat` but has its own
+  strict effort validation upstream.
+- **Sibling:** same concept shipped for llama.cpp by its team
+  (`roles/llamacpp` reference implementation of the `reasoning_efforts`
+  profile convention); SGLang has the analysis but no fix
   (`proxmox/plans/handovers/sglang-anthropic-effort-mapping.md`).
 
 ## 3. Composability
