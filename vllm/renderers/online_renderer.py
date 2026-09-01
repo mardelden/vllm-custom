@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.reasoning_effort import validate_reasoning_effort
 from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -99,6 +100,7 @@ class OnlineRenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        validate_reasoning_effort(self.default_chat_template_kwargs)
         self.trust_request_chat_template = trust_request_chat_template
 
         self.log_error_stack = log_error_stack
@@ -411,6 +413,7 @@ class OnlineRenderer:
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
+        validate_reasoning_effort(chat_params.chat_template_kwargs)
 
         reuse_ids = _reused_prompt_token_ids(request)
         if reuse_ids:
