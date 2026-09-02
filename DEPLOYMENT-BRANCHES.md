@@ -230,10 +230,13 @@ behaves exactly as it does today.
     `reasoning_effort` → `enable_thinking` derivation — even `none` is inert
     there, measured). vllm-chat gets the gate via version consolidation.
   - **jasl DSv4 tree (`dsv4.service`): pending** — box parked at check time.
-    Hand-managed unit, so it also needs
-    `export VLLM_REASONING_EFFORT_ACCEPTED="none,low,high,max"` in
-    `serve-dsv4*.sh` (vocabulary measured by the deploy battery), not the
-    ansible template.
+    Deploy has pre-positioned
+    `export VLLM_REASONING_EFFORT_ACCEPTED=none,low,high,max` in all eight
+    `serve-dsv4*.sh` scripts (inert until the gate commit is ported into the
+    jasl tree; hand edits, overwritten by the next deploy). Anchor check
+    needs a **coordinated window**: vllm-code parks as a stopped container,
+    and starting it auto-starts `vllm.service` into whatever holds the GPUs
+    — ping deploy or the operator before booting it.
 - **Verified vocabularies for today's fleet** (rendered per checkpoint, all
   eight API levels):
 
