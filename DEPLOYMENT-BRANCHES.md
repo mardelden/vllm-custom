@@ -32,7 +32,7 @@ wins** — it is the immutable release contract. This file is the index.
 | `codex/fastsafetensors-parallel-mtp-share` | **opt-in, any model using `--load-format fastsafetensors`** | Two parts are generic loader fixes; one part is Qwen-specific and stays gated. |
 | `codex/glm53-sm120-nope-sparse-mla` | **GLM-5.3-Flash on sm120 only** | Enables a model that otherwise cannot start. Inert for every other model. |
 | `codex/qwen3-vl-skip-zero-video` | **any Qwen3.5-family deployment that does not serve video** | Skips video geometry when no video is requested. Fires on `vllm-code` today (`--limit-mm-per-prompt '{"image":4}'`). Unmeasured. |
-| `codex/reasoning-effort-family-gate` | **every vLLM deployment** | Rejects `reasoning_effort` values the deployed artifact's chat template would silently fold, upgrade, or ignore. Vocabulary declared per profile (`reasoning_efforts` convention); unset = stock passthrough. |
+| `codex/reasoning-effort-gate` | **every vLLM deployment** | Rejects `reasoning_effort` values the deployed artifact's chat template would silently fold, upgrade, or ignore. Vocabulary declared per profile (`reasoning_efforts` convention); unset = stock passthrough. |
 
 Everything defaults to **off**. A deployment that sets no environment variables
 behaves exactly as it does today.
@@ -177,7 +177,7 @@ behaves exactly as it does today.
 
 ---
 
-### `codex/reasoning-effort-family-gate` — deploy fleet-wide
+### `codex/reasoning-effort-gate` — deploy fleet-wide
 
 - **Tip:** `7b224028c3` · **base:** current `upstream/main` (`d0e695a91b`) ·
   **3 files, +149/−0** (2 new; 3 lines in `online_renderer.py`)
