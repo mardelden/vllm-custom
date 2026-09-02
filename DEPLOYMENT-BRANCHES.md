@@ -219,6 +219,21 @@ behaves exactly as it does today.
   `param=reasoning_effort`, naming the declared values.
 - **Default-safe:** env unset or empty = stock passthrough; the branch is a
   no-op until a deployment declares its vocabulary.
+- **Deployment status (2026-09-01):** fleet declarations are live (proxmox
+  `4b996cd`; env confirmed inert-safe on running builds by the deploy team's
+  live battery). The gate itself is in no image yet. Per-tree applicability:
+  - **r2 code line (`74cd835`): applies clean** — all three anchors
+    (import, init block, `with_defaults` block) are byte-identical. A gate
+    image is that tree + this one commit, cut as a new registered release.
+  - **stock 0.21.0 (vllm-chat): no port.** The tree predates
+    `online_renderer.py`/`preprocess_chat` entirely (and the
+    `reasoning_effort` → `enable_thinking` derivation — even `none` is inert
+    there, measured). vllm-chat gets the gate via version consolidation.
+  - **jasl DSv4 tree (`dsv4.service`): pending** — box parked at check time.
+    Hand-managed unit, so it also needs
+    `export VLLM_REASONING_EFFORT_ACCEPTED="none,low,high,max"` in
+    `serve-dsv4*.sh` (vocabulary measured by the deploy battery), not the
+    ansible template.
 - **Verified vocabularies for today's fleet** (rendered per checkpoint, all
   eight API levels):
 
